@@ -8,7 +8,7 @@
  *
  * This file is part of the Lobby Server (lobby).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -39,9 +39,11 @@
 #include <Character.h>
 #include <EntityStats.h>
 #include <Item.h>
+#include <LobbyConfig.h>
 #include <MiItemBasicData.h>
 
 // lobby Includes
+#include "AccountManager.h"
 #include "LobbyClientConnection.h"
 #include "LobbyServer.h"
 #include "ManagerPacket.h"
@@ -52,16 +54,12 @@ bool Parsers::CreateCharacter::Parse(libcomp::ManagerPacket *pPacketManager,
     const std::shared_ptr<libcomp::TcpConnection>& connection,
     libcomp::ReadOnlyPacket& p) const
 {
-    (void)pPacketManager;
-
     if(p.Size() < 45)
     {
         return false;
     }
 
     uint8_t worldID = p.ReadU8();
-
-    LOG_DEBUG(libcomp::String("World: %1\n").Arg(worldID));
 
     if(p.Size() != (uint32_t)(p.PeekU16Little() + 44))
     {
@@ -71,12 +69,19 @@ bool Parsers::CreateCharacter::Parse(libcomp::ManagerPacket *pPacketManager,
     libcomp::String name = p.ReadString16Little(
         libcomp::Convert::ENCODING_CP932);
 
-    LOG_DEBUG(libcomp::String("Name: %1\n").Arg(name));
-
     auto server = std::dynamic_pointer_cast<LobbyServer>(pPacketManager->GetServer());
+    auto config = std::dynamic_pointer_cast<objects::LobbyConfig>(server->GetConfig());
     auto lobbyConnection = std::dynamic_pointer_cast<LobbyClientConnection>(connection);
-    auto lobbyDB = server->GetMainDatabase();
     auto world = server->GetWorldByID(worldID);
+
+    if(!world)
+    {
+        LOG_ERROR(libcomp::String("Tried to create character on world with "
+            "ID %1 but that world was not found.\n").Arg(worldID));
+
+        return false;
+    }
+
     auto worldDB = world->GetWorldDatabase();
     auto account = lobbyConnection->GetClientState()->GetAccount().Get();
     auto characters = account->GetCharacters();
@@ -92,29 +97,41 @@ bool Parsers::CreateCharacter::Parse(libcomp::ManagerPacket *pPacketManager,
         nextCID++;
     }
 
-    libcomp::Packet reply;
-    reply.WritePacketCode(
-        LobbyToClientPacketCode_t::PACKET_CREATE_CHARACTER);
+    uint8_t ticketCount = account->GetTicketCount();
 
+    uint32_t errorCode = 0;
     if(nextCID == characters.size())
     {
         LOG_ERROR(libcomp::String("No new characters can be created for account %1\n")
             .Arg(account->GetUUID().ToString()));
-        reply.WriteU32Little(static_cast<uint32_t>(ErrorCodes_t::NO_EMPTY_CHARACTER_SLOTS));
+        errorCode = static_cast<uint32_t>(ErrorCodes_t::NO_EMPTY_CHARACTER_SLOTS);
     }
-    else if(account->GetTicketCount() == 0)
+    else if(ticketCount == 0)
     {
         LOG_ERROR(libcomp::String("No character tickets available for account %1\n")
             .Arg(account->GetUUID().ToString()));
-        reply.WriteU32Little(static_cast<uint32_t>(ErrorCodes_t::NEED_CHARACTER_TICKET));
+        errorCode = static_cast<uint32_t>(ErrorCodes_t::NEED_CHARACTER_TICKET);
     }
     else if(nullptr != objects::Character::LoadCharacterByName(worldDB, name))
     {
         LOG_ERROR(libcomp::String("Invalid character name entered for account %1\n")
             .Arg(account->GetUUID().ToString()));
-        reply.WriteU32Little(static_cast<uint32_t>(ErrorCodes_t::BAD_CHARACTER_NAME));
+        errorCode = static_cast<uint32_t>(ErrorCodes_t::BAD_CHARACTER_NAME);
     }
-    else
+    else if(!config->GetCharacterNameRegex().IsEmpty())
+    {
+        std::smatch match;
+        std::string input(name.C());
+        std::regex toFind(config->GetCharacterNameRegex().C());
+        if(!std::regex_match(input, match, toFind))
+        {
+            LOG_ERROR(libcomp::String("Invalid character name entered for"
+                " account for server regex %1\n").Arg(account->GetUUID().ToString()));
+            errorCode = static_cast<uint32_t>(ErrorCodes_t::BAD_CHARACTER_NAME);
+        }
+    }
+
+    if(errorCode == 0)
     {
         auto gender = (objects::Character::Gender_t)p.ReadU8();
 
@@ -130,10 +147,12 @@ bool Parsers::CreateCharacter::Parse(libcomp::ManagerPacket *pPacketManager,
         uint32_t equipComp   = p.ReadU32Little();
         uint32_t equipWeapon = p.ReadU32Little();
 
-        uint8_t eyeType = (uint8_t)(gender == objects::Character::Gender_t::MALE ? 1 : 101);
+        // Eye type depends on face type (often very slight difference)
+        uint8_t eyeType = (uint8_t)(gender == objects::Character::Gender_t::MALE
+            ? ((faceType - 1) % 3 + 1) : ((faceType - 101) % 3 + 101));
 
         auto character = libcomp::PersistentObject::New<objects::Character>();
-        character->SetCID(nextCID);
+        character->SetWorldID(worldID);
         character->SetName(name);
         character->SetGender(gender);
         character->SetSkinType((uint8_t)skinType);
@@ -143,12 +162,11 @@ bool Parsers::CreateCharacter::Parse(libcomp::ManagerPacket *pPacketManager,
         character->SetEyeType((uint8_t)eyeType);
         character->SetLeftEyeColor((uint8_t)eyeColor);
         character->SetRightEyeColor((uint8_t)eyeColor);
-        character->SetAccount(account);
+        character->SetAccount(account->GetUUID());
         character->Register(character);
 
         std::unordered_map<size_t, std::shared_ptr<objects::Item>> equipMap;
 
-        /// @todo: Build these properly from item data
         auto itemTop = libcomp::PersistentObject::New<objects::Item>();
         itemTop->SetType(equipTop);
         equipMap[(size_t)
@@ -176,8 +194,7 @@ bool Parsers::CreateCharacter::Parse(libcomp::ManagerPacket *pPacketManager,
 
         auto stats = libcomp::PersistentObject::New<objects::EntityStats>();
         stats->Register(stats);
-        stats->SetEntity(std::dynamic_pointer_cast<
-            libcomp::PersistentObject>(character));
+        stats->SetEntity(character->GetUUID());
         character->SetCoreStats(stats);
 
         bool equipped = true;
@@ -188,32 +205,35 @@ bool Parsers::CreateCharacter::Parse(libcomp::ManagerPacket *pPacketManager,
                 character->SetEquippedItems(pair.first, equip);
         }
 
-        account->SetTicketCount(static_cast<uint8_t>(account->GetTicketCount() - 1));
-
         if(!equipped)
         {
             LOG_ERROR(libcomp::String("Character item data failed to save for account %1\n")
                 .Arg(account->GetUUID().ToString()));
-            reply.WriteU32Little(static_cast<uint32_t>(-1));
+            errorCode = static_cast<uint32_t>(-1);
         }
         else if(!stats->Insert(worldDB) || !character->Insert(worldDB))
         {
             LOG_ERROR(libcomp::String("Character failed to save for account %1\n")
                 .Arg(account->GetUUID().ToString()));
-            reply.WriteU32Little(static_cast<uint32_t>(-1));
+            errorCode = static_cast<uint32_t>(-1);
         }
-        else if(!account->SetCharacters(character->GetCID(), character) ||
-            !account->Update(lobbyDB))
+        else if(!account->SetTicketCount((uint8_t)(ticketCount - 1)) ||
+            !server->GetAccountManager()->SetCharacterOnAccount(account, character))
         {
-            LOG_ERROR(libcomp::String("Account character array failed to save for account %1\n")
-                .Arg(account->GetUUID().ToString()));
-            reply.WriteU32Little(static_cast<uint32_t>(-1));
+            account->SetTicketCount(ticketCount);   // Put the ticket back
+            errorCode = static_cast<uint32_t>(-1);
         }
         else
         {
-            reply.WriteU32Little(0);
+            LOG_DEBUG(libcomp::String("Created character '%1' on world: %2\n")
+                .Arg(name).Arg(worldID));
         }
     }
+
+    libcomp::Packet reply;
+    reply.WritePacketCode(
+        LobbyToClientPacketCode_t::PACKET_CREATE_CHARACTER);
+    reply.WriteU32Little(errorCode);
 
     connection->SendPacket(reply);
 

@@ -9,7 +9,7 @@
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -32,9 +32,13 @@
 #include <ManagerPacket.h>
 #include <PacketCodes.h>
 
+// object Includes
+#include <WorldSharedConfig.h>
+
 // channel Includes
 #include "ChannelClientConnection.h"
 #include "ChannelServer.h"
+#include "ZoneManager.h"
 
 using namespace channel;
 
@@ -47,8 +51,8 @@ bool Parsers::StopMovement::Parse(libcomp::ManagerPacket *pPacketManager,
         return false;
     }
 
-    auto server = std::dynamic_pointer_cast<ChannelServer>(pPacketManager->GetServer());
-    auto client = std::dynamic_pointer_cast<ChannelClientConnection>(connection);
+    auto client = std::dynamic_pointer_cast<ChannelClientConnection>(
+        connection);
     auto state = client->GetClientState();
 
     int32_t entityID = p.ReadS32Little();
@@ -56,15 +60,32 @@ bool Parsers::StopMovement::Parse(libcomp::ManagerPacket *pPacketManager,
     auto eState = state->GetEntityState(entityID, false);
     if(nullptr == eState)
     {
-        LOG_ERROR(libcomp::String("Invalid entity ID received from a stop movement"
-            " request: %1\n").Arg(entityID));
-        return false;
+        LOG_ERROR(libcomp::String("Invalid entity ID received from a stop"
+            " movement request: %1\n").Arg(state->GetAccountUID().ToString()));
+        client->Close();
+        return true;
     }
-    else if(!eState->Ready())
+    else if(!eState->Ready(true))
     {
         // Nothing to do, the entity is not currently active
         return true;
     }
+    else if(state->GetLockMovement())
+    {
+        // Movement locked, ignore request
+        return true;
+    }
+
+    auto zone = eState->GetZone();
+    if(!zone)
+    {
+        // Not actually in a zone
+        return true;
+    }
+
+    auto server = std::dynamic_pointer_cast<ChannelServer>(pPacketManager
+        ->GetServer());
+    auto zoneManager = server->GetZoneManager();
 
     float destX = p.ReadFloat();
     float destY = p.ReadFloat();
@@ -72,31 +93,61 @@ bool Parsers::StopMovement::Parse(libcomp::ManagerPacket *pPacketManager,
 
     ServerTime stopTime = state->ToServerTime(stop);
 
+    bool positionCorrected = false;
+
     // Stop using the current rotation value
-    eState->RefreshCurrentPosition(server->GetServerTime());
+    eState->RefreshCurrentPosition(ChannelServer::GetServerTime());
+
     float rot = eState->GetCurrentRotation();
     eState->SetDestinationRotation(rot);
+
+    const static bool moveCorrection = server->GetWorldSharedConfig()
+        ->GetMoveCorrection();
+    if(moveCorrection)
+    {
+        Point dest(destX, destY);
+        if(zoneManager->CorrectClientPosition(eState, dest))
+        {
+            LOG_DEBUG(libcomp::String("Player movement stop corrected in"
+                " zone %1: %2\n").Arg(zone->GetDefinitionID())
+                .Arg(state->GetAccountUID().ToString()));
+
+            destX = dest.x;
+            destY = dest.y;
+            positionCorrected = true;
+        }
+    }
 
     eState->SetDestinationX(destX);
     eState->SetCurrentX(destX);
     eState->SetDestinationY(destY);
     eState->SetCurrentY(destY);
 
+    eState->SetOriginTicks(stopTime);
     eState->SetDestinationTicks(stopTime);
 
-    auto zoneConnections = server->GetZoneManager()->GetZoneConnections(client, false);
-    if(zoneConnections.size() > 0)
+    // If the entity is still visible to others or the position was corrected,
+    // relay info
+    if(positionCorrected || eState->IsClientVisible())
     {
-        libcomp::Packet reply;
-        reply.WritePacketCode(ChannelToClientPacketCode_t::PACKET_STOP_MOVEMENT);
-        reply.WriteS32Little(entityID);
-        reply.WriteFloat(destX);
-        reply.WriteFloat(destY);
+        auto zConnections = zoneManager->GetZoneConnections(client,
+            positionCorrected);
 
-        std::unordered_map<uint32_t, uint64_t> timeMap;
-        timeMap[reply.Size()] = stopTime;
+        if(zConnections.size() > 0)
+        {
+            libcomp::Packet reply;
+            reply.WritePacketCode(
+                ChannelToClientPacketCode_t::PACKET_STOP_MOVEMENT);
+            reply.WriteS32Little(entityID);
+            reply.WriteFloat(destX);
+            reply.WriteFloat(destY);
 
-        ChannelClientConnection::SendRelativeTimePacket(zoneConnections, reply, timeMap);
+            RelativeTimeMap timeMap;
+            timeMap[reply.Size()] = stopTime;
+
+            ChannelClientConnection::SendRelativeTimePacket(zConnections,
+                reply, timeMap);
+        }
     }
 
     return true;

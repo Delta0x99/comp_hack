@@ -8,7 +8,7 @@
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -30,11 +30,16 @@
 // libcomp Includes
 #include <ScriptEngine.h>
 
+// object Includes
+#include <AIStateObject.h>
+
 // channel Includes
 #include "AICommand.h"
 
-// Standard C++11 includes
-#include <mutex>
+namespace objects
+{
+class MiSkillData;
+}
 
 namespace channel
 {
@@ -63,6 +68,10 @@ const uint16_t AI_SKILL_TYPES_ALLY = 0x1C;
 /// AI skill type mask for all skills
 const uint16_t AI_SKILL_TYPES_ALL = 0x1F;
 
+typedef std::pair<
+    std::shared_ptr<objects::MiSkillData>, uint16_t> AISkillWeight_t;
+typedef std::unordered_map<uint16_t, std::list<AISkillWeight_t>> AISkillMap_t;
+
 /**
  * Possible AI statuses for an active AI controlled entity.
  */
@@ -78,18 +87,13 @@ enum AIStatus_t : uint8_t
  * Contains the state of an entity's AI information when controlled
  * by the channel.
  */
-class AIState
+class AIState : public objects::AIStateObject
 {
 public:
     /**
      * Create a new AI state.
      */
     AIState();
-
-    /**
-     * Clean up the AI state.
-     */
-    virtual ~AIState();
 
     /**
      * Get the status
@@ -114,8 +118,9 @@ public:
      * @param status Status to update the state to
      * @param isDefault Optional parameter to set the status as the
      *  state's default status as well
+     * @return true if it was set, false if it was not
      */
-    void SetStatus(AIStatus_t status, bool isDefault = false);
+    bool SetStatus(AIStatus_t status, bool isDefault = false);
 
     /**
      * Check if the status is set to idle
@@ -136,7 +141,7 @@ public:
 
     /**
      * Get the bound AI script
-     * @return Point to the bound AI script or null if not bound
+     * @return Pointer to the bound AI script or null if not bound
      */
     std::shared_ptr<libcomp::ScriptEngine> GetScript() const;
 
@@ -145,6 +150,29 @@ public:
      * @param aiScript Script to bind to the AI controlled entity
      */
     void SetScript(const std::shared_ptr<libcomp::ScriptEngine>& aiScript);
+
+    /**
+     * Get the AI's aggro value from its base AI definition representing
+     * day, night and enemy casting distances and FoVs
+     * @param mode AI aggro type:
+     *  0) Normal
+     *  1) Night
+     *  2) Enemy skill casting (any time)
+     * @param fov true if the FoV value corresponding to the mode should
+     *  be retrieved, false if the distance should be retrieved
+     * @param defaultVal Default value to return should the requested
+     *  value not exist
+     * @return Aggro distance or FoV corresponding to the requested mode
+     */
+    float GetAggroValue(uint8_t mode, bool fov, float defaultVal);
+
+    /**
+     * Get the AI's de-aggro distnace from its base AI definition.
+     * @param isNight If true, the entity's night search distance will be
+     *  used for the calculation. If false, the normal distance will be used.
+     * @return De-aggro distance for the entity
+     */
+    float GetDeaggroDistance(bool isNight);
 
     /**
      * Get the current command or next command that has not been started
@@ -156,8 +184,11 @@ public:
     /**
      * Queue a command to process for the AI controlled entity
      * @param command Pointer to a command to queue for the entity
+     * @param interrupt If true the command will become the new current
+     *  command. If false the command will be added to the end.
      */
-    void QueueCommand(const std::shared_ptr<AICommand>& command);
+    void QueueCommand(const std::shared_ptr<AICommand>& command,
+        bool interrupt = false);
 
     /**
      * Clear all queued commands
@@ -166,44 +197,13 @@ public:
 
     /**
      * Pop the first command off the command queue
+     * @param specific Optional pointer to the specific command to remove
+     *  in case its not the first command
      * @return Pointer to the command that was removed or null if
      *  there were no commands
      */
-    std::shared_ptr<AICommand> PopCommand();
-
-    /**
-     * Entity ID of the the currently targeted entity or 0 if none
-     * is set
-     * @return Entity ID of the AI controlled entity's target
-     */
-    int32_t GetTarget() const;
-
-    /**
-     * Set the entity ID of the currently targeted entity
-     * @param Entity ID of the currently targeted entity
-     */
-    void SetTarget(int32_t targetEntityID);
-
-    /**
-     * Get the settings mask that specifies what kinds of skills
-     * the AI controlled entity should use
-     * @return skillSettings Skill settings mask
-     */
-    uint16_t GetSkillSettings() const;
-
-    /**
-     * Set the settings mask that specifies what kinds of skills
-     * the AI controlled entity should use
-     * @param skillSettings Skill settings mask
-     */
-    void SetSkillSettings(uint16_t skillSettings);
-
-    /**
-     * Check if the AI controlled entity's skill map has been set
-     * @return true if the skills have been mapped, false if they
-     *  have not
-     */
-    bool SkillsMapped() const;
+    std::shared_ptr<AICommand> PopCommand(
+        const std::shared_ptr<AICommand>& specific = nullptr);
 
     /**
      * Mark the skill map as needing a refresh
@@ -212,44 +212,17 @@ public:
 
     /**
      * Get the mapped skills of the AI controlled entity
-     * @return Map of AI skill types to active skill IDs the entity can use
+     * @return Map of AI skill types to active skill definitions the entity
+     *  can use
      */
-    std::unordered_map<uint16_t,
-        std::vector<uint32_t>> GetSkillMap() const;
+    AISkillMap_t GetSkillMap() const;
 
     /**
      * Set the mapped skills of the AI controlled entity
-     * @param skillMap Map of AI skill types to active skill IDs the entity
-     *  can use
+     * @param skillMap Map of AI skill types to active skill definitions
+     *  the entity can use
      */
-    void SetSkillMap(const std::unordered_map<uint16_t,
-        std::vector<uint32_t>>& skillMap);
-
-    /**
-     * Override a default server side processing action with a
-     * function in the script bound to the entity.
-     * @param action Name of the action to override
-     * @param functionName Name of the script function that will
-     *  override the action. If this is specified as blank, a
-     *  function with the action name specified will be called
-     *  when the action is hit instead.
-     */
-    void OverrideAction(const libcomp::String& action,
-        const libcomp::String& functionName);
-
-    /**
-     * Check if the specified AI action has been overridden
-     * @param action Name of the action to check
-     * @return true if the action has been overridden
-     */
-    bool IsOverriden(const libcomp::String& action);
-
-    /**
-     * Get the script function name set to override the AI action
-     * @param action Name of the action to check
-     * @return Name of the function set to override the AI action
-     */
-    libcomp::String GetScriptFunction(const libcomp::String& action);
+    void SetSkillMap(const AISkillMap_t& skillMap);
 
 private:
     /// List of all AI commands to be processed, starting with the current
@@ -259,21 +232,13 @@ private:
     /// Pointer to the current AI command or the next to process if not started
     std::shared_ptr<AICommand> mCurrentCommand;
 
-    /// Map of AI actions to script function names to call instead
-    std::unordered_map<std::string, libcomp::String> mActionOverrides;
-
-    /// Map of AI skill types to active skill IDs the entity can use
-    std::unordered_map<uint16_t, std::vector<uint32_t>> mSkillMap;
+    /// Map of AI skill types to active skill definitions the entity can use
+    /// with definitions and assigned weights that recalculate whenever the
+    /// set or costs are adjusted
+    AISkillMap_t mSkillMap;
 
     /// Pointer to the AI script to use for the AI controlled entity
     std::shared_ptr<libcomp::ScriptEngine> mAIScript;
-
-    /// Entity ID of another entity in the zone being targeted independent
-    /// of a skill being used
-    int32_t mTargetEntityID;
-
-    /// Mask of AI skill type flags the entity will use
-    uint16_t mSkillSettings;
 
     /// Current AI status of the entity
     AIStatus_t mStatus;
@@ -286,13 +251,6 @@ private:
 
     /// Specifies that the status has changed and hasn't been checked yet
     bool mStatusChanged;
-
-    /// Speifies that the entity's skills need to be mapped for use
-    bool mSkillsMapped;
-
-    /// Server lock for shared resources (represented by pointer for ease
-    /// of Sqrat use)
-    std::mutex* mLock;
 };
 
 } // namespace channel

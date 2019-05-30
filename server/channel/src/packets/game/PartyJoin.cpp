@@ -8,7 +8,7 @@
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -31,10 +31,6 @@
 #include <Packet.h>
 #include <PacketCodes.h>
 
-// objects Includes
-#include <AccountLogin.h>
-#include <CharacterLogin.h>
-
 // channel Includes
 #include "ChannelServer.h"
 
@@ -53,14 +49,18 @@ bool Parsers::PartyJoin::Parse(libcomp::ManagerPacket *pPacketManager,
         libcomp::Convert::Encoding_t::ENCODING_CP932, true);
     uint32_t partyID = p.ReadU32Little();
 
-    auto client = std::dynamic_pointer_cast<ChannelClientConnection>(connection);
-    auto server = std::dynamic_pointer_cast<ChannelServer>(pPacketManager->GetServer());
+    auto client = std::dynamic_pointer_cast<ChannelClientConnection>(
+        connection);
+    auto server = std::dynamic_pointer_cast<ChannelServer>(pPacketManager
+        ->GetServer());
     auto state = client->GetClientState();
     auto member = state->GetPartyCharacter(true);
 
     libcomp::Packet request;
     request.WritePacketCode(InternalPacketCode_t::PACKET_PARTY_UPDATE);
-    request.WriteU8((int8_t)InternalPacketAction_t::PACKET_ACTION_RESPONSE_YES);
+    request.WriteU8(
+        (int8_t)InternalPacketAction_t::PACKET_ACTION_RESPONSE_YES);
+    request.WriteU8(0); // Not from recruit
     member->SavePacket(request, false);
     request.WriteString16Little(libcomp::Convert::Encoding_t::ENCODING_UTF8,
         targetName, true);

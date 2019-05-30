@@ -10,7 +10,7 @@
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -30,9 +30,14 @@
 
 // libcomp Includes
 #include <Log.h>
+#include <ManagerPacket.h>
+
+// object Includes
+#include <WorldSharedConfig.h>
 
 // channel Includes
 #include "ChannelServer.h"
+#include "ZoneManager.h"
 
 using namespace channel;
 
@@ -48,43 +53,81 @@ bool Parsers::Pivot::Parse(libcomp::ManagerPacket *pPacketManager,
     }
 
     int32_t entityID = p.ReadS32Little();
+
+    auto client = std::dynamic_pointer_cast<ChannelClientConnection>(
+        connection);
+    auto state = client->GetClientState();
+
+    auto eState = state->GetEntityState(entityID);
+    if(!eState)
+    {
+        LOG_ERROR(libcomp::String("Invalid entity ID received from a pivot"
+            " request: %1\n").Arg(state->GetAccountUID().ToString()));
+        client->Close();
+        return true;
+    }
+    else if(!eState->Ready(true))
+    {
+        // Nothing to do, the entity is not currently active
+        return true;
+    }
+    else if(state->GetLockMovement())
+    {
+        // Movement locked, ignore request
+        return true;
+    }
+
+    auto zone = eState->GetZone();
+    if(!zone)
+    {
+        // Not actually in a zone
+        return true;
+    }
+
     float x = p.ReadFloat();
     float y = p.ReadFloat();
     float rot = p.ReadFloat();
     float startTime = p.ReadFloat();
     float stopTime = p.ReadFloat();
 
-    auto client = std::dynamic_pointer_cast<ChannelClientConnection>(connection);
-    auto state = client->GetClientState();
+    auto server = std::dynamic_pointer_cast<ChannelServer>(pPacketManager
+        ->GetServer());
+    auto zoneManager = server->GetZoneManager();
 
-    auto entity = state->GetEntityState(entityID);
-    if(!entity)
+    const static bool moveCorrection = server->GetWorldSharedConfig()
+        ->GetMoveCorrection();
+    if(moveCorrection)
     {
-        LOG_ERROR("Player attempted to pivot an entity that does not belong"
-            " to the client\n");
-        state->SetLogoutSave(true);
-        client->Close();
-        return true;
+        Point dest(x, y);
+        if(zoneManager->CorrectClientPosition(eState, dest))
+        {
+            LOG_DEBUG(libcomp::String("Player pivot corrected in"
+                " zone %1: %2\n").Arg(zone->GetDefinitionID())
+                .Arg(state->GetAccountUID().ToString()));
+
+            x = dest.x;
+            y = dest.y;
+        }
     }
 
     // Make sure the request is not in the future
     ServerTime now = ChannelServer::GetServerTime();
-    if(now >= startTime)
+    if(now >= state->ToServerTime(startTime))
     {
-        entity->SetOriginX(x);
-        entity->SetOriginY(y);
-        entity->SetOriginRotation(rot);
-        entity->SetOriginTicks(now);
-        entity->SetDestinationX(x);
-        entity->SetDestinationY(y);
-        entity->SetDestinationRotation(rot);
-        entity->SetDestinationTicks(now);
+        eState->SetOriginX(x);
+        eState->SetOriginY(y);
+        eState->SetOriginRotation(rot);
+        eState->SetOriginTicks(now);
+        eState->SetDestinationX(x);
+        eState->SetDestinationY(y);
+        eState->SetDestinationRotation(rot);
+        eState->SetDestinationTicks(now);
 
         ServerTime stopConverted = state->ToServerTime(stopTime);
-        uint64_t immobileTime = entity->GetStatusTimes(STATUS_IMMOBILE);
+        uint64_t immobileTime = eState->GetStatusTimes(STATUS_IMMOBILE);
         if(stopConverted > immobileTime)
         {
-            entity->SetStatusTimes(STATUS_IMMOBILE, stopConverted);
+            eState->SetStatusTimes(STATUS_IMMOBILE, stopConverted);
         }
     }
 

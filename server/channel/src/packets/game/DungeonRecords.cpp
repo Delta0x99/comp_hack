@@ -9,7 +9,7 @@
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -31,6 +31,9 @@
 #include <Packet.h>
 #include <PacketCodes.h>
 
+// object Includes
+#include <CharacterProgress.h>
+
 // channel Includes
 #include "ChannelClientConnection.h"
 
@@ -47,19 +50,22 @@ bool Parsers::DungeonRecords::Parse(libcomp::ManagerPacket *pPacketManager,
         return false;
     }
 
-    /// @todo: implement non-default values
+    auto client = std::dynamic_pointer_cast<ChannelClientConnection>(connection);
+    auto state = client->GetClientState();
+    auto cState = state->GetCharacterState();
+    auto character = cState->GetEntity();
+    auto progress = character->GetProgress().Get();
     
     libcomp::Packet reply;
     reply.WritePacketCode(ChannelToClientPacketCode_t::PACKET_DUNGEON_CHALLENGES);
     reply.WriteS8(0);   // Unknown
-    reply.WriteS8((int8_t)0xFF);   // Active dungeon
-    reply.WriteU16Little(0);   // Active dungeon time
+    reply.WriteS8(progress->GetTimeTrialID());
+    reply.WriteU16Little(progress->GetTimeTrialTime());
 
-    int8_t challengeCount = 28;
-    reply.WriteS8(challengeCount);
-    for(int8_t i = 0; i < challengeCount; i++)
+    reply.WriteS8((int8_t)progress->TimeTrialRecordsCount());
+    for(uint16_t trialTime : progress->GetTimeTrialRecords())
     {
-        reply.WriteU16Little((uint16_t)-1);    // Record time (in seconds)
+        reply.WriteU16Little(trialTime ? trialTime : (uint16_t)-1);
     }
 
     connection->SendPacket(reply);

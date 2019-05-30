@@ -8,7 +8,7 @@
  *
  * This file is part of the World Server (world).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -36,9 +36,14 @@
 #include <MessageWorldNotification.h>
 #include <PacketCodes.h>
 
-// Object Includes
+// object Includes
+#include <WorldConfig.h>
+
+// world Includes
+#include "AccountManager.h"
+#include "CharacterManager.h"
 #include "Packets.h"
-#include "WorldConfig.h"
+#include "WorldSyncManager.h"
 
 using namespace world;
 
@@ -69,14 +74,17 @@ bool WorldServer::Initialize()
     configMap[objects::ServerConfig::DatabaseType_t::MARIADB]
         = conf->GetMariaDBConfig();
 
-    mDatabase = GetDatabase(configMap, true);
+    mDatabase = GetDatabase(configMap, true, GetDataStore(),
+        "/migrations/world");
 
     if(nullptr == mDatabase)
     {
         return false;
     }
 
+    mAccountManager = new AccountManager(self);
     mCharacterManager = new CharacterManager(self);
+    mSyncManager = new WorldSyncManager(self);
 
     return true;
 }
@@ -84,15 +92,14 @@ bool WorldServer::Initialize()
 void WorldServer::FinishInitialize()
 {
     auto conf = std::dynamic_pointer_cast<objects::WorldConfig>(mConfig);
+    auto self = shared_from_this();
 
-    mManagerConnection = std::make_shared<ManagerConnection>(
-        shared_from_this());
+    mManagerConnection = std::make_shared<ManagerConnection>(self);
 
     auto connectionManager = std::dynamic_pointer_cast<libcomp::Manager>(mManagerConnection);
 
     // Build the lobby manager
-    auto packetManager = std::make_shared<libcomp::ManagerPacket>(
-        shared_from_this());
+    auto packetManager = std::make_shared<libcomp::ManagerPacket>(self);
     packetManager->AddParser<Parsers::GetWorldInfo>(to_underlying(
         InternalPacketCode_t::PACKET_GET_WORLD_INFO));
     packetManager->AddParser<Parsers::SetChannelInfo>(to_underlying(
@@ -101,14 +108,17 @@ void WorldServer::FinishInitialize()
         InternalPacketCode_t::PACKET_ACCOUNT_LOGIN));
     packetManager->AddParser<Parsers::AccountLogout>(to_underlying(
         InternalPacketCode_t::PACKET_ACCOUNT_LOGOUT));
+    packetManager->AddParser<Parsers::DataSync>(to_underlying(
+        InternalPacketCode_t::PACKET_DATA_SYNC));
+    packetManager->AddParser<Parsers::WebGame>(
+        to_underlying(InternalPacketCode_t::PACKET_WEB_GAME));
 
     // Add the managers to the main worker.
     mMainWorker.AddManager(packetManager);
     mMainWorker.AddManager(connectionManager);
 
     // Build the channel manager
-    packetManager = std::make_shared<libcomp::ManagerPacket>(
-        shared_from_this());
+    packetManager = std::make_shared<libcomp::ManagerPacket>(self);
     packetManager->AddParser<Parsers::GetWorldInfo>(to_underlying(
         InternalPacketCode_t::PACKET_GET_WORLD_INFO));
     packetManager->AddParser<Parsers::SetChannelInfo>(to_underlying(
@@ -119,6 +129,8 @@ void WorldServer::FinishInitialize()
         InternalPacketCode_t::PACKET_ACCOUNT_LOGOUT));
     packetManager->AddParser<Parsers::Relay>(to_underlying(
         InternalPacketCode_t::PACKET_RELAY));
+    packetManager->AddParser<Parsers::DataSync>(to_underlying(
+        InternalPacketCode_t::PACKET_DATA_SYNC));
     packetManager->AddParser<Parsers::CharacterLogin>(to_underlying(
         InternalPacketCode_t::PACKET_CHARACTER_LOGIN));
     packetManager->AddParser<Parsers::FriendsUpdate>(to_underlying(
@@ -127,6 +139,10 @@ void WorldServer::FinishInitialize()
         InternalPacketCode_t::PACKET_PARTY_UPDATE));
     packetManager->AddParser<Parsers::ClanUpdate>(to_underlying(
         InternalPacketCode_t::PACKET_CLAN_UPDATE));
+    packetManager->AddParser<Parsers::WebGame>(
+        to_underlying(InternalPacketCode_t::PACKET_WEB_GAME));
+    packetManager->AddParser<Parsers::TeamUpdate>(
+        to_underlying(InternalPacketCode_t::PACKET_TEAM_UPDATE));
 
     // Add the managers to the generic workers.
     for(auto worker : mWorkers)
@@ -145,6 +161,8 @@ void WorldServer::FinishInitialize()
         libcomp::Message::Message*>>();
 
     lobbyConnection->SetMessageQueue(messageQueue);
+    lobbyConnection->SetName("lobby_notify");
+    lobbyConnection->SetListenPort(conf->GetPort());
 
     lobbyConnection->Connect(conf->GetLobbyIP(), conf->GetLobbyPort(), false);
 
@@ -183,7 +201,9 @@ void WorldServer::FinishInitialize()
 
 WorldServer::~WorldServer()
 {
+    delete mAccountManager;
     delete mCharacterManager;
+    delete mSyncManager;
 }
 
 const std::shared_ptr<objects::RegisteredWorld> WorldServer::GetRegisteredWorld() const
@@ -244,25 +264,44 @@ uint8_t WorldServer::GetNextChannelID() const
     return static_cast<uint8_t>(mRegisteredChannels.size());
 }
 
-std::shared_ptr<objects::RegisteredChannel> WorldServer::GetLoginChannel() const
-{
-    /// @todo: fix this once channels are registered with public/private zones
-    return mRegisteredChannels.size() > 0 ? mRegisteredChannels.begin()->second : nullptr;
-}
-
 const std::shared_ptr<libcomp::InternalConnection> WorldServer::GetLobbyConnection() const
 {
     return mManagerConnection->GetLobbyConnection();
 }
 
-void WorldServer::RegisterChannel(const std::shared_ptr<objects::RegisteredChannel>& channel,
+void WorldServer::RegisterChannel(
+    const std::shared_ptr<objects::RegisteredChannel>& channel,
     const std::shared_ptr<libcomp::InternalConnection>& connection)
 {
-    mRegisteredChannels[connection] = channel;
+    {
+        std::lock_guard<std::mutex> lock(mLock);
+        mRegisteredChannels[connection] = channel;
+    }
+
+    // Register the channel connection with the sync manager and sync
+    // existing records
+    const std::set<std::string> channelSyncTypes = {
+            "CharacterLogin",
+            "EventCounter",
+            "InstanceAccess",
+            "Match",
+            "MatchEntry",
+            "PentalphaEntry",
+            "PentalphaMatch",
+            "PvPMatch",
+            "SearchEntry",
+            "UBResult",
+            "UBTournament"
+        };
+
+    mSyncManager->RegisterConnection(connection, channelSyncTypes);
+    mSyncManager->SyncExistingChannelRecords(connection);
 }
 
 bool WorldServer::RemoveChannel(const std::shared_ptr<libcomp::InternalConnection>& connection)
 {
+    std::lock_guard<std::mutex> lock(mLock);
+
     auto iter = mRegisteredChannels.find(connection);
     if(iter != mRegisteredChannels.end())
     {
@@ -355,12 +394,17 @@ bool WorldServer::RegisterServer()
 
 AccountManager* WorldServer::GetAccountManager()
 {
-    return &mAccountManager;
+    return mAccountManager;
 }
 
-CharacterManager* WorldServer::GetCharacterManager()
+CharacterManager* WorldServer::GetCharacterManager() const
 {
     return mCharacterManager;
+}
+
+WorldSyncManager* WorldServer::GetWorldSyncManager() const
+{
+    return mSyncManager;
 }
 
 uint32_t WorldServer::GetRelayPacket(libcomp::Packet& p,
@@ -393,6 +437,8 @@ void WorldServer::GetRelayPacket(libcomp::Packet& p, int32_t targetCID,
 std::shared_ptr<libcomp::TcpConnection> WorldServer::CreateConnection(
     asio::ip::tcp::socket& socket)
 {
+    static int connectionID = 0;
+
     auto connection = std::make_shared<libcomp::InternalConnection>(
         socket, CopyDiffieHellman(GetDiffieHellman()));
 
@@ -401,9 +447,13 @@ std::shared_ptr<libcomp::TcpConnection> WorldServer::CreateConnection(
         // Assign this to the main worker.
         connection->SetMessageQueue(mMainWorker.GetMessageQueue());
         connection->ConnectionSuccess();
+        connection->SetName(libcomp::String("%1:lobby").Arg(connectionID++));
     }
     else if(true)  /// @todo: ensure that channels can start connecting
     {
+        connection->SetName(libcomp::String("%1:channel").Arg(
+            connectionID++));
+
         if(AssignMessageQueue(connection))
         {
             connection->ConnectionSuccess();

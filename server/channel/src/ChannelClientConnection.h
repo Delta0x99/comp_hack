@@ -8,7 +8,7 @@
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -35,6 +35,8 @@
 
 namespace channel
 {
+
+typedef std::unordered_map<uint32_t, uint64_t> RelativeTimeMap;
 
 /**
  * Represents a connection to the game client.
@@ -75,12 +77,22 @@ public:
     uint64_t GetTimeout() const;
 
     /**
+     * Close the connection after marking it to not save any logout data.
+     * This is useful for if the client gets into a state that is too complex
+     * to recover from to avoid data corruption.
+     */
+    void Kill();
+
+    /**
      * Broadcast the supplied packet to each client connection in the list.
      * @param clients List of client connections to send the packet to
      * @param packet Packet to send to the supplied clients
+     * @param queue Optional parameter to queue packets for the supplied connections
+     *  instead of sending immediately
      */
     static void BroadcastPacket(const std::list<std::shared_ptr<
-        ChannelClientConnection>>& clients, libcomp::Packet& packet);
+        ChannelClientConnection>>& clients, libcomp::Packet& packet,
+        bool queue = false);
 
     /**
      * Broadcast the supplied list of packets to each client connection in the list.
@@ -108,7 +120,7 @@ public:
      */
     static void SendRelativeTimePacket(
         const std::list<std::shared_ptr<ChannelClientConnection>>& clients,
-        libcomp::Packet& p, const std::unordered_map<uint32_t, uint64_t>& timeMap,
+        libcomp::Packet& p, const RelativeTimeMap& timeMap,
         bool queue = false);
 
 private:

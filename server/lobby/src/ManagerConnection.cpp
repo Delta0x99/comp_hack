@@ -8,7 +8,7 @@
  *
  * This file is part of the Lobby Server (lobby).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -26,10 +26,6 @@
 
 #include "ManagerConnection.h"
 
-// lobby Includes
-#include "LobbyConfig.h"
-#include "LobbyServer.h"
-
 // libcomp Includes
 #include <DatabaseConfigSQLite3.h>
 #include <Log.h>
@@ -41,6 +37,11 @@
 
 // object Includes
 #include <Account.h>
+
+// lobby Includes
+#include "AccountManager.h"
+#include "LobbyConfig.h"
+#include "LobbyServer.h"
 
 using namespace lobby;
 
@@ -88,6 +89,8 @@ bool ManagerConnection::ProcessMessage(const libcomp::Message::Message *pMessage
                 auto worldConnection = std::make_shared<
                     libcomp::InternalConnection>(*mService);
 
+                worldConnection->SetName(libcomp::String("world:%1:%2").Arg(
+                    address).Arg(port));
                 worldConnection->SetMessageQueue(mMessageQueue);
 
                 // Connect and stay connected until either of us shutdown
@@ -103,7 +106,7 @@ bool ManagerConnection::ProcessMessage(const libcomp::Message::Message *pMessage
                     mUnregisteredWorlds.push_back(world);
                     return true;
                 }
-        
+
                 LOG_ERROR(libcomp::String("World connection failed: %1:%2\n").Arg(address).Arg(port));
             }
             break;
@@ -145,7 +148,7 @@ bool ManagerConnection::ProcessMessage(const libcomp::Message::Message *pMessage
             }
             break;
     }
-    
+
     return false;
 }
 
@@ -313,7 +316,7 @@ void ManagerConnection::RemoveWorld(std::shared_ptr<lobby::World>& world)
             svr->SetStatus(objects::RegisteredWorld::Status_t::INACTIVE);
             svr->Update(db);
         }
-        
+
         iter = std::find(mUnregisteredWorlds.begin(), mUnregisteredWorlds.end(), world);
         if(iter != mUnregisteredWorlds.end())
         {
@@ -388,8 +391,7 @@ void ManagerConnection::RemoveClientConnection(const std::shared_ptr<
         if(accountManager->IsLoggedIn(username, worldID) && worldID == -1)
         {
             LOG_DEBUG(libcomp::String("Logging out user: '%1'\n").Arg(username));
-            accountManager->LogoutUser(username, worldID);
-            server->GetSessionManager()->ExpireSession(username);
+            accountManager->Logout(username);
         }
     }
 }

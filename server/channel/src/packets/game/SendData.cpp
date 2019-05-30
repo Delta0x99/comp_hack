@@ -11,7 +11,7 @@
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -33,14 +33,22 @@
 #include <Log.h>
 #include <ManagerPacket.h>
 #include <PacketCodes.h>
+#include <ServerConstants.h>
+#include <ServerDataManager.h>
 
 // object includes
 #include <Account.h>
-#include <ServerZone.h>
 #include <ChannelConfig.h>
+#include <ChannelLogin.h>
+#include <InstanceAccess.h>
+#include <ServerZone.h>
+#include <ServerZoneInstance.h>
+#include <WorldSharedConfig.h>
 
 // channel Includes
 #include "ChannelServer.h"
+#include "CharacterManager.h"
+#include "ZoneManager.h"
 
 using namespace channel;
 
@@ -48,22 +56,22 @@ void SendClientReadyData(std::shared_ptr<ChannelServer> server,
     const std::shared_ptr<ChannelClientConnection> client)
 {
     auto characterManager = server->GetCharacterManager();
+    auto serverDataManager = server->GetServerDataManager();
     auto zoneManager = server->GetZoneManager();
     auto state = client->GetClientState();
+    auto channelLogin = state->GetChannelLogin();
     auto cState = state->GetCharacterState();
     auto character = cState->GetEntity();
-    auto account = character->GetAccount();
 
     // Send world time
     {
-        int8_t phase, hour, min;
-        server->GetWorldClockTime(phase, hour, min);
+        auto clock = server->GetWorldClockTime();
 
         libcomp::Packet p;
         p.WritePacketCode(ChannelToClientPacketCode_t::PACKET_WORLD_TIME);
-        p.WriteS8(phase);
-        p.WriteS8(hour);
-        p.WriteS8(min);
+        p.WriteS8(clock.MoonPhase);
+        p.WriteS8(clock.Hour);
+        p.WriteS8(clock.Min);
 
         client->QueuePacket(p);
     }
@@ -79,71 +87,107 @@ void SendClientReadyData(std::shared_ptr<ChannelServer> server,
 
         client->QueuePacket(p);
     }
-      
-    auto conf = std::dynamic_pointer_cast<objects::ChannelConfig>(server->GetConfig());
-    libcomp::String systemMessage = conf->GetSystemMessage();
 
+    auto conf = std::dynamic_pointer_cast<objects::ChannelConfig>(server->GetConfig());
+
+    // Send any server system messages
+    libcomp::String systemMessage = conf->GetSystemMessage();
     if(!systemMessage.IsEmpty()) 
     {
-        server->SendSystemMessage(client,systemMessage,0,false);
+        server->SendSystemMessage(client, systemMessage,
+            (int8_t)conf->GetSystemMessageColor(), false);
     }
-    
-    /// @todo: send "world bonus" [0x0405]
-    /// @todo: send player skill updates (toggleable abilities for example) [0x03B8]
+
+    auto worldSharedConfig = conf->GetWorldSharedConfig();
+    libcomp::String compShopMessage = worldSharedConfig->GetCOMPShopMessage();
+    if(!compShopMessage.IsEmpty())
+    {
+        server->SendSystemMessage(client, compShopMessage, 4, false);
+    }
+
+    // Send client recognized world bonuses
+    {
+        /// @todo: identify more of these
+        libcomp::Packet p;
+        p.WritePacketCode(ChannelToClientPacketCode_t::PACKET_WORLD_BONUS);
+        p.WriteS32Little(1);
+
+        p.WriteS32Little(2);    // Type
+        p.WriteFloat(worldSharedConfig->GetDeathPenaltyDisabled() ? 0.f : 1.f);
+
+        client->QueuePacket(p);
+    }
 
     // Set character icon
     characterManager->SetStatusIcon(client);
 
-    // Send zone information
+    // Add to the login zone
     {
-        // Default to last logout information first
-        uint32_t zoneID = character->GetLogoutZone();
-        float xCoord = character->GetLogoutX();
-        float yCoord = character->GetLogoutY();
-        float rotation = character->GetLogoutRotation();
-
-        // Default to homepoint second
-        if(zoneID == 0)
+        std::shared_ptr<objects::InstanceAccess> instAccess;
+        if(channelLogin && channelLogin->GetToZoneID())
         {
-            zoneID = character->GetHomepointZone();
-            xCoord = character->GetHomepointX();
-            yCoord = character->GetHomepointY();
-            rotation = 0;
-        }
-
-        // Make sure the player can start in the zone
-        if(zoneID != 0)
-        {
-            auto serverDataManager = server->GetServerDataManager();
-            auto zoneData = serverDataManager->GetZoneData(zoneID, 0);
-            auto zoneLobbyData = zoneData && !zoneData->GetGlobal()
-                ? serverDataManager->GetZoneData(zoneData->GetGroupID(), 0)
-                : nullptr;
-            if(zoneLobbyData)
+            // Enter instance if valid
+            auto access = zoneManager->GetInstanceAccess(state
+                ->GetWorldCID());
+            if(access && serverDataManager->ExistsInInstance(
+                access->GetDefinitionID(), channelLogin->GetToZoneID(),
+                channelLogin->GetToDynamicMapID()))
             {
-                zoneID = zoneLobbyData->GetID();
-                xCoord = zoneLobbyData->GetStartingX();
-                yCoord = zoneLobbyData->GetStartingY();
-                rotation = zoneLobbyData->GetStartingRotation();
+                instAccess = access;
+
+                if(channelLogin->GetFromChannel() == -1)
+                {
+                    // Recovering from an instance disconnect, set last
+                    // zone and instance ID to simulate respawn
+                    state->SetLastZoneID(channelLogin->GetToZoneID());
+                    state->SetLastInstanceID(instAccess->GetInstanceID());
+                }
             }
         }
 
-        // If all else fails start in the default zone
-        if(zoneID == 0)
+        if(instAccess)
         {
-            /// @todo: make this configurable?
-            zoneID = 90105;
-            xCoord = 0;
-            yCoord = 0;
-            rotation = 0;
+            if(!zoneManager->MoveToInstance(client, instAccess, true))
+            {
+                LOG_ERROR(libcomp::String("Failed to add client to zone"
+                    " instance %1. Closing the connection.\n")
+                    .Arg(instAccess->GetDefinitionID()));
+                client->Close();
+                return;
+            }
         }
-
-        if(!zoneManager->EnterZone(client, zoneID, 0, xCoord, yCoord, rotation))
+        else
         {
-            LOG_ERROR(libcomp::String("Failed to add client to zone"
-                " %1. Closing the connection.\n").Arg(zoneID));
-            client->Close();
-            return;
+            // Normal login, get zone info and verify channel
+            uint32_t zoneID = 0, dynamicMapID = 0;
+            float x = 0.f, y = 0.f, rot = 0.f;
+
+            int8_t channelID = -1;
+            if(!zoneManager->GetLoginZone(character, zoneID, dynamicMapID,
+                channelID, x, y, rot))
+            {
+                LOG_ERROR(libcomp::String("Login zone for character %1 could"
+                    " not be determined.\n")
+                    .Arg(character->GetUUID().ToString()));
+                client->Close();
+                return;
+            }
+            else if(channelID != -1 &&
+                (uint8_t)channelID != server->GetChannelID())
+            {
+                // Don't actually fail here, attempt to move to other channel
+                LOG_ERROR(libcomp::String("Login zone information determined"
+                    " for character %1 was not valid for this channel.\n")
+                    .Arg(character->GetUUID().ToString()));
+            }
+
+            if(!zoneManager->EnterZone(client, zoneID, dynamicMapID, x, y, rot))
+            {
+                LOG_ERROR(libcomp::String("Failed to add client to zone"
+                    " %1. Closing the connection.\n").Arg(zoneID));
+                client->Close();
+                return;
+            }
         }
     }
 
@@ -157,8 +201,13 @@ void SendClientReadyData(std::shared_ptr<ChannelServer> server,
         client->QueuePacket(p);
     }
 
-    /// @todo: send skill cost rate [0x019E]
-    /// @todo: send "connected commu SV" [0x015A]
+    {
+        libcomp::Packet p;
+        p.WritePacketCode(ChannelToClientPacketCode_t::PACKET_COMM_SERVER_STATE);
+        p.WriteS32Little(1);    // Connected
+
+        client->QueuePacket(p);
+    }
 
     client->FlushOutgoing();
 }

@@ -8,7 +8,7 @@
  *
  * This file is part of the Lobby Server (lobby).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -26,11 +26,6 @@
 
 #include "LobbyServer.h"
 
-// lobby Includes
-#include "LobbyClientConnection.h"
-#include "ManagerClientPacket.h"
-#include "Packets.h"
-
 // libcomp Includes
 #include <DatabaseConfigMariaDB.h>
 #include <DatabaseConfigSQLite3.h>
@@ -40,11 +35,20 @@
 
 // Object Includes
 #include "Account.h"
+#include "Character.h"
 #include "LobbyConfig.h"
 #include "RegisteredWorld.h"
 
 // Standard C++11 Includes
 #include <iostream>
+
+// lobby Includes
+#include "AccountManager.h"
+#include "LobbyClientConnection.h"
+#include "LobbySyncManager.h"
+#include "ManagerClientPacket.h"
+#include "ManagerConnection.h"
+#include "Packets.h"
 
 using namespace lobby;
 
@@ -52,13 +56,14 @@ LobbyServer::LobbyServer(const char *szProgram,
     std::shared_ptr<objects::ServerConfig> config,
     std::shared_ptr<libcomp::ServerCommandLineParser> commandLine,
     bool unitTestMode) : libcomp::BaseServer(szProgram, config, commandLine),
-    mUnitTestMode(unitTestMode)
+    mUnitTestMode(unitTestMode), mAccountManager(nullptr),
+    mSyncManager(nullptr)
 {
 }
 
 bool LobbyServer::Initialize()
 {
-    auto self = shared_from_this();
+    auto self = std::dynamic_pointer_cast<LobbyServer>(shared_from_this());
 
     if(!BaseServer::Initialize())
     {
@@ -76,21 +81,15 @@ bool LobbyServer::Initialize()
     configMap[objects::ServerConfig::DatabaseType_t::MARIADB]
         = conf->GetMariaDBConfig();
 
-    mDatabase = GetDatabase(configMap, true);
+    mDatabase = GetDatabase(configMap, true, GetDataStore(),
+        "/migrations/lobby");
 
     if(nullptr == mDatabase)
     {
         return false;
     }
 
-    if(mUnitTestMode)
-    {
-        if(!InitializeTestMode())
-        {
-            return false;
-        }
-    }
-    else if(!mDatabase->TableHasRows("Account"))
+    if(!mUnitTestMode && !mDatabase->TableHasRows("Account"))
     {
         if(!Setup())
         {
@@ -101,15 +100,20 @@ bool LobbyServer::Initialize()
     mManagerConnection = std::make_shared<ManagerConnection>(
         self, &mService, mMainWorker.GetMessageQueue());
 
+    mAccountManager = new AccountManager(this);
+    mSyncManager = new LobbySyncManager(self);
+
+    if(!mSyncManager->Initialize())
+    {
+        return false;
+    }
+
     // Reset the RegisteredWorld table and pull information from
     // known worlds into the connection manager
     if(!ResetRegisteredWorlds())
     {
         return false;
     }
-
-    auto connectionManager = std::dynamic_pointer_cast<libcomp::Manager>(
-        mManagerConnection);
 
     auto internalPacketManager = std::make_shared<libcomp::ManagerPacket>(self);
     internalPacketManager->AddParser<Parsers::SetWorldInfo>(
@@ -120,10 +124,14 @@ bool LobbyServer::Initialize()
         to_underlying(InternalPacketCode_t::PACKET_ACCOUNT_LOGIN));
     internalPacketManager->AddParser<Parsers::AccountLogout>(
         to_underlying(InternalPacketCode_t::PACKET_ACCOUNT_LOGOUT));
+    internalPacketManager->AddParser<Parsers::DataSync>(to_underlying(
+        InternalPacketCode_t::PACKET_DATA_SYNC));
+    internalPacketManager->AddParser<Parsers::WebGame>(
+        to_underlying(InternalPacketCode_t::PACKET_WEB_GAME));
 
     //Add the managers to the main worker.
     mMainWorker.AddManager(internalPacketManager);
-    mMainWorker.AddManager(connectionManager);
+    mMainWorker.AddManager(mManagerConnection);
 
     auto clientPacketManager = std::make_shared<ManagerClientPacket>(self);
     clientPacketManager->AddParser<Parsers::Login>(to_underlying(
@@ -149,7 +157,7 @@ bool LobbyServer::Initialize()
     for(auto worker : mWorkers)
     {
         worker->AddManager(clientPacketManager);
-        worker->AddManager(connectionManager);
+        worker->AddManager(mManagerConnection);
     }
 
     return true;
@@ -157,6 +165,8 @@ bool LobbyServer::Initialize()
 
 LobbyServer::~LobbyServer()
 {
+    delete mAccountManager;
+    delete mSyncManager;
 }
 
 std::list<std::shared_ptr<lobby::World>> LobbyServer::GetWorlds() const
@@ -256,8 +266,13 @@ std::shared_ptr<ManagerConnection> LobbyServer::GetManagerConnection() const
 std::shared_ptr<libcomp::TcpConnection> LobbyServer::CreateConnection(
     asio::ip::tcp::socket& socket)
 {
+    static int connectionID = 0;
+
     auto connection = std::make_shared<LobbyClientConnection>(
         socket, CopyDiffieHellman(GetDiffieHellman()));
+
+    // Set a unique connection ID for the name of the connection.
+    connection->SetName(libcomp::String("client:%1").Arg(connectionID++));
 
     if(AssignMessageQueue(connection))
     {
@@ -275,13 +290,6 @@ std::shared_ptr<libcomp::TcpConnection> LobbyServer::CreateConnection(
     }
 
     return connection;
-}
-
-bool LobbyServer::InitializeTestMode()
-{
-    /// @todo: Is this still needed now that mock data is inserted elsewhere?
-
-    return true;
 }
 
 void LobbyServer::CreateFirstAccount()
@@ -501,7 +509,6 @@ void LobbyServer::PromptCreateAccount()
     account->SetEmail(email);
     account->SetPassword(password);
     account->SetSalt(salt);
-    account->SetIsGM(true);
     account->SetCP(cp);
     account->SetTicketCount(ticketCount);
     account->SetUserLevel(userLevel);
@@ -524,12 +531,12 @@ bool LobbyServer::Setup()
 
 AccountManager* LobbyServer::GetAccountManager()
 {
-    return &mAccountManager;
+    return mAccountManager;
 }
 
-SessionManager* LobbyServer::GetSessionManager()
+LobbySyncManager* LobbyServer::GetLobbySyncManager() const
 {
-    return &mSessionManager;
+    return mSyncManager;
 }
 
 bool LobbyServer::ResetRegisteredWorlds()
@@ -559,4 +566,247 @@ bool LobbyServer::ResetRegisteredWorlds()
     }
 
     return true;
+}
+
+libcomp::String LobbyServer::GetFakeAccountSalt(
+    const libcomp::String& username)
+{
+    // Lock the muxtex.
+    std::lock_guard<std::mutex> lock(mFakeSaltsLock);
+
+    auto it = mFakeSalts.find(username);
+
+    if(mFakeSalts.end() == it)
+    {
+        auto salt = libcomp::Decrypt::GenerateRandom(10);
+
+        mFakeSalts[username] = salt;
+
+        return salt;
+    }
+    else
+    {
+        return it->second;
+    }
+}
+
+libcomp::String LobbyServer::ImportAccount(const libcomp::String& data,
+    uint8_t worldID)
+{
+    tinyxml2::XMLDocument doc;
+
+    if(tinyxml2::XML_SUCCESS != doc.Parse(data.C()))
+    {
+        return "Failed to parse account data.";
+    }
+
+    const tinyxml2::XMLElement *pImportObject = doc.RootElement(
+        )->FirstChildElement("object");
+
+    std::shared_ptr<libcomp::Database> lobbyDB, worldDB;
+
+    {
+        lobbyDB = GetMainDatabase();
+
+        auto world = GetWorldByID(worldID);
+
+        if(world)
+        {
+            worldDB = world->GetWorldDatabase();
+        }
+    }
+
+    if(!lobbyDB || !worldDB)
+    {
+        return "Failed to connect to database.";
+    }
+
+    std::list<std::pair<libobjgen::UUID,
+        std::shared_ptr<libcomp::PersistentObject>>> lobbyObjects;
+    std::list<std::pair<libobjgen::UUID,
+        std::shared_ptr<libcomp::PersistentObject>>> worldObjects;
+
+    while(nullptr != pImportObject)
+    {
+        std::string objectType(pImportObject->Attribute("name"));
+
+        auto typeExists = false;
+        auto typeHash = libcomp::PersistentObject::GetTypeHashByName(
+            objectType, typeExists);
+
+        if(!typeExists)
+        {
+            return libcomp::String("Failed to parse unknown "
+                "object '%1'.").Arg(objectType);
+        }
+
+        // Grab the UUID for the object.
+        std::string uuidText;
+        libobjgen::UUID uuid;
+
+        const tinyxml2::XMLElement *pMember =
+            pImportObject->FirstChildElement("member");
+
+        while(nullptr != pMember)
+        {
+            if("uuid" == libcomp::String(pMember->Attribute(
+                "name")).ToLower())
+            {
+                uuidText = pMember->GetText();
+                uuid = libobjgen::UUID(uuidText);
+
+                break;
+            }
+
+            pMember = pMember->NextSiblingElement("member");
+        }
+
+        // Make sure every object has a UUID.
+        if(uuid.IsNull())
+        {
+            return libcomp::String("Bad UUID '%1' for object "
+                "'%2'").Arg(uuidText).Arg(objectType);
+        }
+
+        auto obj = libcomp::PersistentObject::New(typeHash);
+
+        if(!obj || !obj->Load(doc, *pImportObject))
+        {
+            return libcomp::String("Failed to load object '%1' with "
+                "UUID %2.").Arg(objectType).Arg(uuid.ToString());
+        }
+
+        std::shared_ptr<libcomp::Database> db;
+
+        if("Account" == objectType)
+        {
+            db = lobbyDB;
+
+            lobbyObjects.push_back(std::make_pair(uuid, obj));
+        }
+        else
+        {
+            db = worldDB;
+
+            worldObjects.push_back(std::make_pair(uuid, obj));
+        }
+
+        if(!db)
+        {
+            return "Failed to connect to database.";
+        }
+
+        auto existingObject = libcomp::PersistentObject::LoadObjectByUUID(
+            typeHash, db, uuid);
+
+        if(existingObject)
+        {
+            return libcomp::String("Object with UUID '%1' already exists "
+                "in database.").Arg(uuid.ToString());
+        }
+
+        libcomp::String importError = CheckImportObject(objectType, obj,
+            lobbyDB, worldDB);
+
+        if(!importError.IsEmpty())
+        {
+            return importError;
+        }
+
+        pImportObject = pImportObject->NextSiblingElement("object");
+    }
+
+    for(auto pair : lobbyObjects)
+    {
+        if(!pair.second->Register(pair.second, pair.first))
+        {
+            return "Failed to register an object.";
+        }
+    }
+
+    for(auto pair : worldObjects)
+    {
+        if(!pair.second->Register(pair.second, pair.first))
+        {
+            return "Failed to register an object.";
+        }
+    }
+
+    auto lobbyChangeSet = libcomp::DatabaseChangeSet::Create();
+
+    for(auto pair : lobbyObjects)
+    {
+        lobbyChangeSet->Insert(pair.second);
+    }
+
+    if(!lobbyDB->ProcessChangeSet(lobbyChangeSet))
+    {
+        LOG_ERROR(libcomp::String("Import failed with lobby database error: "
+            "%1\n").Arg(lobbyDB->GetLastError()));
+
+        return "Failed to write account into database.";
+    }
+
+    auto worldChangeSet = libcomp::DatabaseChangeSet::Create();
+
+    for(auto pair : worldObjects)
+    {
+        worldChangeSet->Insert(pair.second);
+    }
+
+    if(!worldDB->ProcessChangeSet(worldChangeSet))
+    {
+        LOG_ERROR(libcomp::String("Import failed with world database error: "
+            "%1\n").Arg(worldDB->GetLastError()));
+
+        return "Failed to write account into database.";
+    }
+
+    return {};
+}
+
+libcomp::String LobbyServer::CheckImportObject(
+    const libcomp::String& objectType,
+    const std::shared_ptr<libcomp::PersistentObject>& obj,
+    const std::shared_ptr<libcomp::Database>& lobbyDB,
+    const std::shared_ptr<libcomp::Database>& worldDB)
+{
+    if("Account" == objectType)
+    {
+        auto account = std::dynamic_pointer_cast<objects::Account>(obj);
+        auto conf = std::dynamic_pointer_cast<objects::LobbyConfig>(mConfig);
+
+        if(objects::Account::LoadAccountByUsername(
+                lobbyDB, account->GetUsername()) ||
+            objects::Account::LoadAccountByEmail(
+                lobbyDB, account->GetEmail()))
+        {
+            return libcomp::String("Account '%1' exists").Arg(
+                account->GetUsername());
+        }
+
+        if(conf->GetImportStripCP())
+        {
+            account->SetCP(0);
+        }
+
+        if(conf->GetImportStripUserLevel())
+        {
+            account->SetUserLevel(0);
+        }
+    }
+
+    if("Character" == objectType)
+    {
+        auto character = std::dynamic_pointer_cast<objects::Character>(obj);
+
+        if(objects::Character::LoadCharacterByName(
+            worldDB, character->GetName()))
+        {
+            return libcomp::String("Character '%1' exists").Arg(
+                character->GetName());
+        }
+    }
+
+    return {};
 }

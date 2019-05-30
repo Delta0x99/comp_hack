@@ -8,7 +8,7 @@
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -36,8 +36,10 @@
 #include <Account.h>
 #include <AccountLogin.h>
 #include <ChannelConfig.h>
+#include <Party.h>
 
 // channel Includes
+#include "AccountManager.h"
 #include "ChannelServer.h"
 #include "ClientState.h"
 
@@ -116,9 +118,11 @@ void ManagerConnection::RequestWorldInfo()
 {
     if(nullptr != mWorldConnection)
     {
-        //Request world information
+        // Request world information
         libcomp::Packet packet;
         packet.WritePacketCode(InternalPacketCode_t::PACKET_GET_WORLD_INFO);
+        packet.WriteS8(std::dynamic_pointer_cast<objects::ChannelConfig>(
+            mServer.lock()->GetConfig())->GetReservedID());
 
         mWorldConnection->SendPacket(packet);
     }
@@ -197,17 +201,62 @@ void ManagerConnection::RemoveClientConnection(const std::shared_ptr<
             mServer.lock());
         auto accountManager = server->GetAccountManager();
         accountManager->Logout(connection);
+
+        // Inform the world that the connection has closed, whether they've
+        // been logged in successfully or not yet
+        libcomp::Packet p;
+        p.WritePacketCode(InternalPacketCode_t::PACKET_ACCOUNT_LOGOUT);
+        p.WriteU32Little((uint32_t)LogoutPacketAction_t::LOGOUT_DISCONNECT);
+        p.WriteString16Little(
+            libcomp::Convert::Encoding_t::ENCODING_UTF8, username);
+
+        GetWorldConnection()->SendPacket(p);
     }
+}
+
+std::list<std::shared_ptr<ChannelClientConnection>>
+    ManagerConnection::GetAllConnections()
+{
+    std::list<std::shared_ptr<ChannelClientConnection>> clients;
+
+    std::lock_guard<std::mutex> lock(mLock);
+    for(auto& pair : mClientConnections)
+    {
+        clients.push_back(pair.second);
+    }
+
+    return clients;
 }
 
 const std::shared_ptr<ChannelClientConnection>
     ManagerConnection::GetEntityClient(int32_t id, bool worldID)
 {
     auto state = ClientState::GetEntityClientState(id, worldID);
-    auto cState = state != nullptr ? state->GetCharacterState() : nullptr;
-    return cState && cState->GetEntity() != nullptr
-        ? GetClientConnection(cState->GetEntity()->GetAccount()->GetUsername())
-        : nullptr;
+    if(state)
+    {
+        auto account = std::dynamic_pointer_cast<objects::Account>(
+            libcomp::PersistentObject::GetObjectByUUID(state->GetAccountUID()));
+        return account ? GetClientConnection(account->GetUsername()) : nullptr;
+    }
+
+    return nullptr;
+}
+
+std::list<std::shared_ptr<ChannelClientConnection>>
+    ManagerConnection::GetEntityClients(std::set<int32_t> ids, bool worldID)
+{
+    std::list<std::shared_ptr<ChannelClientConnection>> results;
+
+    for(int32_t id : ids)
+    {
+        auto client = GetEntityClient(id, worldID);
+        if(client)
+        {
+            results.push_back(client);
+        }
+    }
+
+    return results;
 }
 
 std::list<std::shared_ptr<ChannelClientConnection>>
@@ -224,23 +273,62 @@ std::list<std::shared_ptr<ChannelClientConnection>>
 
     uint16_t cidCount = p.ReadU16Little();
 
-    std::list<int32_t> cids;
+    std::set<int32_t> cids;
     for(uint16_t i = 0; i < cidCount; i++)
     {
-        cids.push_back(p.ReadS32Little());
+        cids.insert(p.ReadS32Little());
     }
 
-    for(int32_t cid : cids)
-    {
-        auto client = GetEntityClient(cid, true);
-        if(client)
-        {
-            results.push_back(client);
-        }
-    }
+    results = GetEntityClients(cids, true);
 
     success = true;
     return results;
+}
+
+std::list<std::shared_ptr<ChannelClientConnection>>
+    ManagerConnection::GetPartyConnections(const std::shared_ptr<
+    ChannelClientConnection>& client, bool includeSelf, bool zoneRestrict)
+{
+    std::list<std::shared_ptr<ChannelClientConnection>> result;
+
+    auto state = client->GetClientState();
+    if(includeSelf)
+    {
+        result.push_back(client);
+    }
+
+    auto party = state->GetParty();
+    if(party)
+    {
+        auto sourceZone = state->GetZone();
+        for(auto memberClient : GetEntityClients(party->GetMemberIDs(), true))
+        {
+            if(memberClient && memberClient != client)
+            {
+                auto memberState = memberClient->GetClientState();
+                if(!zoneRestrict || memberState->GetZone() == sourceZone)
+                {
+                    result.push_back(memberClient);
+                }
+            }
+        }
+    }
+
+    return result;
+}
+
+void ManagerConnection::BroadcastPacketToClients(libcomp::Packet& packet)
+{
+    std::list<std::shared_ptr<ChannelClientConnection>> clients;
+    {
+        std::lock_guard<std::mutex> lock(mLock);
+        for(auto cPair : mClientConnections)
+        {
+            clients.push_back(cPair.second);
+        }
+    }
+
+    ChannelClientConnection::BroadcastPacket(clients, packet);
 }
 
 bool ManagerConnection::ScheduleClientTimeoutHandler(uint16_t timeout)
@@ -292,7 +380,7 @@ void ManagerConnection::HandleClientTimeouts(uint64_t now, uint16_t timeout)
             p.WriteU32Little((uint32_t)LogoutPacketAction_t::LOGOUT_DISCONNECT);
             p.WriteString16Little(
                 libcomp::Convert::Encoding_t::ENCODING_UTF8, timedOut);
-            p.WriteU8(1);
+            p.WriteS8(1);   // Normal kick
             mWorldConnection->QueuePacket(p);
         }
         mWorldConnection->FlushOutgoing();

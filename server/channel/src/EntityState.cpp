@@ -8,7 +8,7 @@
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -27,7 +27,12 @@
 #include "EntityState.h"
 
 // channel Includes
+#include <DiasporaBase.h>
 #include <LootBox.h>
+#include <PlasmaSpawn.h>
+#include <PvPBase.h>
+#include <ServerBazaar.h>
+#include <ServerCultureMachineSet.h>
 #include <ServerNPC.h>
 #include <ServerObject.h>
 
@@ -35,11 +40,19 @@ namespace channel
 {
 
 template<>
+EntityState<objects::DiasporaBase>::EntityState(
+    const std::shared_ptr<objects::DiasporaBase>& entity)
+    : mEntity(entity)
+{
+    SetEntityType(EntityType_t::DIASPORA_BASE);
+}
+
+template<>
 EntityState<objects::ServerObject>::EntityState(
     const std::shared_ptr<objects::ServerObject>& entity)
     : mEntity(entity)
 {
-    SetEntityType(objects::EntityStateObject::EntityType_t::OBJECT);
+    SetEntityType(EntityType_t::OBJECT);
 }
 
 template<>
@@ -47,7 +60,23 @@ EntityState<objects::ServerNPC>::EntityState(
     const std::shared_ptr<objects::ServerNPC>& entity)
     : mEntity(entity)
 {
-    SetEntityType(objects::EntityStateObject::EntityType_t::NPC);
+    SetEntityType(EntityType_t::NPC);
+}
+
+template<>
+EntityState<objects::ServerBazaar>::EntityState(
+    const std::shared_ptr<objects::ServerBazaar>& entity)
+    : mEntity(entity)
+{
+    SetEntityType(EntityType_t::BAZAAR);
+}
+
+template<>
+EntityState<objects::ServerCultureMachineSet>::EntityState(
+    const std::shared_ptr<objects::ServerCultureMachineSet>& entity)
+    : mEntity(entity)
+{
+    SetEntityType(EntityType_t::CULTURE_MACHINE);
 }
 
 template<>
@@ -55,7 +84,23 @@ EntityState<objects::LootBox>::EntityState(
     const std::shared_ptr<objects::LootBox>& entity)
     : mEntity(entity)
 {
-    SetEntityType(objects::EntityStateObject::EntityType_t::LOOT_BOX);
+    SetEntityType(EntityType_t::LOOT_BOX);
+}
+
+template<>
+EntityState<objects::PlasmaSpawn>::EntityState(
+    const std::shared_ptr<objects::PlasmaSpawn>& entity)
+    : mEntity(entity)
+{
+    SetEntityType(EntityType_t::PLASMA);
+}
+
+template<>
+EntityState<objects::PvPBase>::EntityState(
+    const std::shared_ptr<objects::PvPBase>& entity)
+    : mEntity(entity)
+{
+    SetEntityType(EntityType_t::PVP_BASE);
 }
 
 }

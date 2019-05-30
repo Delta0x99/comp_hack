@@ -8,7 +8,7 @@
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -27,6 +27,7 @@
 #include "Packets.h"
 
 // libcomp Includes
+#include <Log.h>
 #include <ManagerPacket.h>
 #include <Packet.h>
 #include <PacketCodes.h>
@@ -38,11 +39,13 @@
 #include <ItemBox.h>
 #include <MiItemBasicData.h>
 #include <MiItemData.h>
-#include <TradeSession.h>
+#include <PlayerExchangeSession.h>
 
 // channel Includes
 #include "ChannelServer.h"
+#include "CharacterManager.h"
 #include "ClientState.h"
+#include "ManagerConnection.h"
 
 using namespace channel;
 
@@ -61,37 +64,42 @@ bool Parsers::TradeFinish::Parse(libcomp::ManagerPacket *pPacketManager,
     auto client = std::dynamic_pointer_cast<ChannelClientConnection>(connection);
     auto state = client->GetClientState();
     auto cState = state->GetCharacterState();
-    auto tradeSession = state->GetTradeSession();
+    auto exchangeSession = state->GetExchangeSession();
 
-    auto otherCState = std::dynamic_pointer_cast<CharacterState>(
-        state->GetTradeSession()->GetOtherCharacterState());
-    auto otherChar = otherCState != nullptr ? otherCState->GetEntity() : nullptr;
-    auto otherClient = otherChar != nullptr ?
-        server->GetManagerConnection()->GetClientConnection(
-            otherChar->GetAccount()->GetUsername()) : nullptr;
+    auto otherCState = exchangeSession ? std::dynamic_pointer_cast<CharacterState>(
+        exchangeSession->GetOtherCharacterState()) : nullptr;
+    auto otherClient = otherCState ? server->GetManagerConnection()->GetEntityClient(
+        otherCState->GetEntityID(), false) : nullptr;
     if(!otherClient)
     {
-        characterManager->EndTrade(client);
+        characterManager->EndExchange(client);
         return true;
     }
 
-    auto otherState = otherClient->GetClientState();
-    auto otherTradeSession = otherState->GetTradeSession();
+    bool success = false;
 
-    // Nothing wrong with the trade setup
+    auto otherState = otherClient->GetClientState();
+    auto otherSession = otherState->GetExchangeSession();
+    if(otherSession)
+    {
+        success = true;
+
+        exchangeSession->SetFinished(true);
+
+        libcomp::Packet notify;
+        notify.WritePacketCode(ChannelToClientPacketCode_t::PACKET_TRADE_FINISHED);
+
+        otherClient->SendPacket(notify);
+    }
+
     libcomp::Packet reply;
     reply.WritePacketCode(ChannelToClientPacketCode_t::PACKET_TRADE_FINISH);
-    reply.WriteS32Little(0);
+    reply.WriteS32Little(success ? 0 : -1);
+
     client->SendPacket(reply);
 
-    reply.Clear();
-    reply.WritePacketCode(ChannelToClientPacketCode_t::PACKET_TRADE_FINISHED);
-    otherClient->SendPacket(reply);
-
-    tradeSession->SetFinished(true);
-
     // Wait on the other player
-    if(!otherTradeSession->GetFinished())
+    if(!otherSession->GetFinished())
     {
         return true;
     }
@@ -102,17 +110,11 @@ bool Parsers::TradeFinish::Parse(libcomp::ManagerPacket *pPacketManager,
     auto otherCharacter = otherCState->GetEntity();
     auto otherInventory = otherCharacter->GetItemBoxes(0).Get();
 
-    std::set<size_t> freeSlots;
-    for(size_t i = 0; i < inventory->ItemsCount(); i++)
-    {
-        if(inventory->GetItems(i).IsNull())
-        {
-            freeSlots.insert(i);
-        }
-    }
+    auto freeSlots = characterManager->GetFreeSlots(client,
+        inventory);
 
     std::vector<std::shared_ptr<objects::Item>> tradeItems;
-    for(auto tradeItem : tradeSession->GetItems())
+    for(auto tradeItem : exchangeSession->GetItems())
     {
         if(!tradeItem.IsNull())
         {
@@ -121,17 +123,11 @@ bool Parsers::TradeFinish::Parse(libcomp::ManagerPacket *pPacketManager,
         }
     }
 
-    std::set<size_t> otherFreeSlots;
-    for(size_t i = 0; i < otherInventory->ItemsCount(); i++)
-    {
-        if(otherInventory->GetItems(i).IsNull())
-        {
-            otherFreeSlots.insert(i);
-        }
-    }
+    auto otherFreeSlots = characterManager->GetFreeSlots(otherClient,
+        otherInventory);
 
     std::vector<std::shared_ptr<objects::Item>> otherTradeItems;
-    for(auto tradeItem : otherTradeSession->GetItems())
+    for(auto tradeItem : otherSession->GetItems())
     {
         if(!tradeItem.IsNull())
         {
@@ -142,14 +138,14 @@ bool Parsers::TradeFinish::Parse(libcomp::ManagerPacket *pPacketManager,
 
     if(tradeItems.size() > otherFreeSlots.size())
     {
-        characterManager->EndTrade(client, 3);
-        characterManager->EndTrade(otherClient, 2);
+        characterManager->EndExchange(client, 3);
+        characterManager->EndExchange(otherClient, 2);
         return true;
     }
     else if(otherTradeItems.size() > freeSlots.size())
     {
-        characterManager->EndTrade(client, 2);
-        characterManager->EndTrade(otherClient, 3);
+        characterManager->EndExchange(client, 2);
+        characterManager->EndExchange(otherClient, 3);
         return true;
     }
 
@@ -161,9 +157,8 @@ bool Parsers::TradeFinish::Parse(libcomp::ManagerPacket *pPacketManager,
     {
         characterManager->UnequipItem(client, item);
 
-        auto box = item->GetItemBox();
         updatedSlots.push_back((uint16_t)item->GetBoxSlot());
-        box->SetItems((size_t)item->GetBoxSlot(), NULLUUID);
+        inventory->SetItems((size_t)item->GetBoxSlot(), NULLUUID);
     }
 
     std::list<uint16_t> otherUpdatedSlots;
@@ -171,9 +166,8 @@ bool Parsers::TradeFinish::Parse(libcomp::ManagerPacket *pPacketManager,
     {
         characterManager->UnequipItem(otherClient, item);
 
-        auto box = item->GetItemBox();
         otherUpdatedSlots.push_back((uint16_t)item->GetBoxSlot());
-        box->SetItems((size_t)item->GetBoxSlot(), NULLUUID);
+        otherInventory->SetItems((size_t)item->GetBoxSlot(), NULLUUID);
     }
 
     // Step 2: Transfer items and prepare changes
@@ -189,7 +183,7 @@ bool Parsers::TradeFinish::Parse(libcomp::ManagerPacket *pPacketManager,
             otherTradeItems.erase(otherTradeItems.begin());
             inventory->SetItems(i, item);
             item->SetBoxSlot((int8_t)i);
-            item->SetItemBox(inventory);
+            item->SetItemBox(inventory->GetUUID());
             updatedSlots.push_back((uint16_t)i);
             changes->Update(item);
         }
@@ -205,7 +199,7 @@ bool Parsers::TradeFinish::Parse(libcomp::ManagerPacket *pPacketManager,
             tradeItems.erase(tradeItems.begin());
             otherInventory->SetItems(i, item);
             item->SetBoxSlot((int8_t)i);
-            item->SetItemBox(otherInventory);
+            item->SetItemBox(otherInventory->GetUUID());
             otherUpdatedSlots.push_back((uint16_t)i);
             changes->Update(item);
         }
@@ -216,8 +210,6 @@ bool Parsers::TradeFinish::Parse(libcomp::ManagerPacket *pPacketManager,
     if(!db->ProcessChangeSet(changes))
     {
         LOG_ERROR("Trade failed to save.\n");
-        state->SetLogoutSave(true);
-        otherState->SetLogoutSave(true);
         client->Close();
         otherClient->Close();
     }
@@ -228,8 +220,8 @@ bool Parsers::TradeFinish::Parse(libcomp::ManagerPacket *pPacketManager,
         characterManager->SendItemBoxData(otherClient, otherInventory,
             otherUpdatedSlots);
 
-        characterManager->EndTrade(client, 0);
-        characterManager->EndTrade(otherClient, 0);
+        characterManager->EndExchange(client, 0);
+        characterManager->EndExchange(otherClient, 0);
     }
 
     return true;

@@ -4,11 +4,11 @@
  *
  * @author HACKfrost
  *
- * @brief Unknown
+ * @brief Request from the client for the character's culture item data.
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -30,8 +30,13 @@
 #include <Packet.h>
 #include <PacketCodes.h>
 
+// object Includes
+#include <CultureData.h>
+#include <Item.h>
+
 // channel Includes
 #include "ChannelClientConnection.h"
+#include "ChannelServer.h"
 
 using namespace channel;
 
@@ -46,14 +51,24 @@ bool Parsers::CultureData::Parse(libcomp::ManagerPacket *pPacketManager,
         return false;
     }
 
-    /// @todo: implement non-default values
-    
+    auto client = std::dynamic_pointer_cast<ChannelClientConnection>(
+        connection);
+    auto state = client->GetClientState();
+    auto cState = state->GetCharacterState();
+    auto character = cState->GetEntity();
+    auto cultureData = character ? character->GetCultureData().Get() : nullptr;
+    auto cultureItem = cultureData ? cultureData->GetItem().Get() : nullptr;
+
+    bool active = cultureData && cultureData->GetActive();
+
     libcomp::Packet reply;
     reply.WritePacketCode(ChannelToClientPacketCode_t::PACKET_CULTURE_DATA);
 
-    reply.WriteS8(0);   //Unknown
-    reply.WriteS32Little(0);   //Unknown
-    reply.WriteU32Little(static_cast<uint32_t>(-1));   //Unknown
+    reply.WriteS8(0);   // Success
+    reply.WriteS32Little(active ? ChannelServer::GetExpirationInSeconds(
+        cultureData->GetExpiration()) : 0);
+    reply.WriteU32Little(active ? cultureItem->GetType()
+        : static_cast<uint32_t>(-1));
 
     connection->SendPacket(reply);
 

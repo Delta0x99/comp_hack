@@ -8,7 +8,7 @@
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -32,9 +32,14 @@
 
 namespace libcomp
 {
-
 class Database;
+}
 
+namespace objects
+{
+class Account;
+class ChannelLogin;
+class CharacterLogin;
 }
 
 namespace channel
@@ -115,16 +120,97 @@ public:
         bool delay = false);
 
     /**
+     * Request that a client disconnect from the server. Typically used
+     * following an initial logout request from the client.
+     * @param client Pointer to the client connection
+     */
+    void RequestDisconnect(const std::shared_ptr<
+        channel::ChannelClientConnection>& client);
+
+    /**
+     * Create a channel change ChannelLogin for the supplied client and save
+     * all logout information now. The world communication must be handled
+     * elsewhere.
+     * @param client Pointer to the client connection
+     * @param zoneID ID of the zone the player will enter on the other channel.
+     *  If 0 the current character state will be used.
+     * @param dynamicMapID Dynamic map ID of the zone the player will enter on
+     *  the other channel. If 0 the current character state will be used.
+     * @param channelID ID of the channel being moved to
+     * @return Pointer to the channel change ChannelLogin
+     */
+    std::shared_ptr<objects::ChannelLogin> PrepareChannelChange(
+        const std::shared_ptr<channel::ChannelClientConnection>& client,
+        uint32_t zoneID, uint32_t dynamicMapID, uint8_t channelID);
+
+    /**
      * Authenticate an account by its connection.
      * @param client Pointer to the client connection
      */
     void Authenticate(const std::shared_ptr<
         channel::ChannelClientConnection>& client);
 
+    /**
+     * Increase the account's current CP balance.
+     * @param account Pointer to the account to update
+     * @param addAmount Amount of CP to add to the account
+     * @return true if the amount was updated, false if it
+     *  could not be updated
+     */
+    bool IncreaseCP(const std::shared_ptr<
+        objects::Account>& account, int64_t addAmount);
+
+    /**
+     * Send the account's current CP balance.
+     * @param client Pointer to the client connection
+     */
+    void SendCPBalance(const std::shared_ptr<
+        channel::ChannelClientConnection>& client);
+
+    /**
+     * Get all active CharacterLogins associated to the world
+     * @return Map of active CharacterLogins by world CID
+     */
+    std::unordered_map<int32_t,
+        std::shared_ptr<objects::CharacterLogin>> GetActiveLogins();
+
+    /**
+     * Get an active CharacterLogin by world CID
+     * @param characterUID Character UUID to retrieve
+     * @return Pointer to the active CharacterLogin or null if no matching
+     *  UID is active
+     */
+    std::shared_ptr<objects::CharacterLogin> GetActiveLogin(
+        const libobjgen::UUID& characterUID);
+
+    /**
+     * Update all registered CharacterLogins on the server
+     * @param update List of updated CharacterLogins
+     * @param removes List of removed CharacterLogins
+     */
+    void UpdateLogins(
+        std::list<std::shared_ptr<objects::CharacterLogin>> updates,
+        std::list<std::shared_ptr<objects::CharacterLogin>> removes);
+
+    /**
+     * Dump the account and return it. This account data can then be
+     * imported into another server.
+     * @param state ClientState object for the account to dump.
+     * @returns Dump of the account or an empty string on error.
+     */
+    libcomp::String DumpAccount(channel::ClientState *state);
+
 private:
     /**
-     * Create character data if not initialized or load
-     * if it has been initaliazed.
+     * Delete a <member> from an object in the XML DOM.
+     * @param pElement Object element to delete the <member> from.
+     * @param field Name of the member field to delete.
+     */
+    void WipeMember(tinyxml2::XMLElement *pElement,
+        const std::string& field);
+
+    /**
+     * Create/load character data for use upon logging in.
      * @param character Character to initialize
      * @param state Pointer to the client state the character
      *  belongs to
@@ -135,44 +221,40 @@ private:
         channel::ClientState* state);
 
     /**
+     * Create character data if not initialized.
+     * Supported objects are as follows:
+     * - Character (limited fields)
+     * - CharacterProgress (only one per file)
+     * - Item (including starting equipment)
+     * - Demon (limited to COMP slots)
+     * - EntityStats (stats/level for character, level only for demon,
+     *   must by linked via UID)
+     * - Expertise (must be linked via UID)
+     * - Hotbar (must be linked via UID)
+     * @param character Character to initialize
+     * @return true on success, false on failure
+     */
+    bool InitializeNewCharacter(std::shared_ptr<
+        objects::Character> character);
+
+    /**
      * Persist character data associated to a client that is
      * logging out.
      * @param state Pointer to the client state the character
      *  belongs to
-     * @param delay Optional parameter to perform the normal
-     *  logout save actions but do not unregister anything.
-     *  If this is specified, a second pass to this function
-     *  should be performed later.
      * @return true on success, false on failure
      */
-    bool LogoutCharacter(channel::ClientState* state,
-        bool delay = false);
+    bool LogoutCharacter(channel::ClientState* state);
 
-    /**
-     * Unload an object from references and update it in the DB.
-     * @param obj Pointer to the object to clean up
-     * @param db Pointer to the database to use
-     * @param doSave Indicates if the record should be updated
-     * @param unregister Indicates if the record should be unloaded
-     *  and unregistered
-     * @return true on success, false on failure
-     */
-    template <class T>
-    bool Cleanup(const std::shared_ptr<T>& obj,
-        const std::shared_ptr<libcomp::Database>& db,
-        bool doSave, bool unregister = true)
-    {
-        if(obj != nullptr)
-        {
-            if(unregister)
-            {
-                libcomp::ObjectReference<T>::Unload(obj->GetUUID());
-                obj->Unregister();
-            }
-            return !doSave || obj->Update(db);
-        }
-        return true;
-    }
+    /// Map of all character logins active on the world by world CID
+    std::unordered_map<int32_t,
+        std::shared_ptr<objects::CharacterLogin>> mActiveLogins;
+
+    /// Map of character UUIDs to world CID for any active login
+    std::unordered_map<libcomp::String, int32_t> mCIDMap;
+
+    /// Server lock for shared resources
+    std::mutex mLock;
 
     /// Pointer to the channel server
     std::weak_ptr<ChannelServer> mServer;

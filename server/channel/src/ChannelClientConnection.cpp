@@ -8,7 +8,7 @@
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -25,6 +25,8 @@
  */
 
 #include "ChannelClientConnection.h"
+
+#include "ChannelServer.h"
 
 using namespace channel;
 
@@ -53,16 +55,32 @@ uint64_t ChannelClientConnection::GetTimeout() const
     return mTimeout;
 }
 
-void ChannelClientConnection::BroadcastPacket(const std::list<std::shared_ptr<
-    ChannelClientConnection>>& clients, libcomp::Packet& packet)
+void ChannelClientConnection::Kill()
 {
-    std::list<std::shared_ptr<libcomp::TcpConnection>> connections;
-    for(auto client : clients)
-    {
-        connections.push_back(client);
-    }
+    mClientState->SetLogoutSave(false);
+    Close();
+}
 
-    libcomp::TcpConnection::BroadcastPacket(connections, packet);
+void ChannelClientConnection::BroadcastPacket(const std::list<std::shared_ptr<
+    ChannelClientConnection>>& clients, libcomp::Packet& packet, bool queue)
+{
+    if(queue)
+    {
+        for(auto client : clients)
+        {
+            client->QueuePacketCopy(packet);
+        }
+    }
+    else
+    {
+        std::list<std::shared_ptr<libcomp::TcpConnection>> connections;
+        for(auto client : clients)
+        {
+            connections.push_back(client);
+        }
+
+        libcomp::TcpConnection::BroadcastPacket(connections, packet);
+    }
 }
 
 void ChannelClientConnection::BroadcastPackets(const std::list<std::shared_ptr<
@@ -90,7 +108,7 @@ void ChannelClientConnection::FlushAllOutgoing(const std::list<std::shared_ptr<
 
 void ChannelClientConnection::SendRelativeTimePacket(
     const std::list<std::shared_ptr<ChannelClientConnection>>& clients,
-    libcomp::Packet& packet, const std::unordered_map<uint32_t, uint64_t>& timeMap,
+    libcomp::Packet& packet, const RelativeTimeMap& timeMap,
     bool queue)
 {
     for(auto client : clients)

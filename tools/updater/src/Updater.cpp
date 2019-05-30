@@ -8,7 +8,7 @@
  *
  * This tool will update the game client.
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -26,6 +26,7 @@
 
 #include "Updater.h"
 #include "Downloader.h"
+#include "Options.h"
 
 #include <PushIgnore.h>
 #include <QMenu>
@@ -95,6 +96,8 @@ Updater::Updater(QWidget *p) : QWidget(p), mDone(false)
         this, SLOT(showDXDiag()));
     connect(ui.checkButton, SIGNAL(clicked(bool)),
         this, SLOT(recheck()));
+    connect(ui.retryButton, SIGNAL(clicked(bool)),
+        this, SLOT(retry()));
 
     mDownloadThread.start();
 }
@@ -348,8 +351,17 @@ void Updater::unlock()
         while( !versionMap.atEnd() );
     }
 
-    ui.playButton->setMenu(playMenu);
+    if (mVersionMap.size() > 1)
+    {
+        ui.playButton->setMenu(playMenu);
+    }
+    else
+    {
+        connect(ui.playButton, SIGNAL(clicked(bool)), this, SLOT(startGame()));
+    }
+
     ui.playButton->setEnabled(true);
+    ui.settingsButton->setEnabled(true);
 }
 
 bool Updater::copyFile(const QString& src, const QString& dest)
@@ -367,47 +379,53 @@ bool Updater::copyFile(const QString& src, const QString& dest)
 
 void Updater::startGame()
 {
+    QFile serverInfo("ImagineClient.dat");
+    serverInfo.open(QIODevice::WriteOnly);
+
+    VersionData *ver;
     QAction *action = qobject_cast<QAction*>(sender());
-    if(action)
+
+    if (action)
     {
-        QFile serverInfo("ImagineClient.dat");
-        serverInfo.open(QIODevice::WriteOnly);
-
         QString tag = action->data().toString();
-        if( !mVersionMap.contains(tag) )
+        if (!mVersionMap.contains(tag))
             return;
+        ver = mVersionMap.value(tag);
+    }
+    else 
+    {
+        ver = *mVersionMap.begin();
+    }
+    
+    if (!ver)
+        return;
 
-        VersionData *ver = mVersionMap.value(tag);
-        if(!ver)
-            return;
+    QStringList serv = ver->server.split(':');
 
-        QStringList serv = ver->server.split(':');
+    serverInfo.write(QString("-ip %1\r\n").arg(serv.at(0)).toUtf8());
+    serverInfo.write(QString("-port %1\r\n").arg(serv.at(1)).toUtf8());
+    serverInfo.close();
 
-        serverInfo.write( QString("-ip %1\r\n").arg(serv.at(0)).toUtf8() );
-        serverInfo.write( QString("-port %1\r\n").arg(serv.at(1)).toUtf8() );
-        serverInfo.close();
+    QMapIterator<QString, QString> it(ver->files);
 
-        QMapIterator<QString, QString> it(ver->files);
+    while (it.hasNext())
+    {
+        it.next();
 
-        while( it.hasNext() )
+        QString file = it.key();
+        QString suffix = it.value();
+
+        QString source = tr("%1/%2.%3").arg(
+            qApp->applicationDirPath()).arg(file).arg(suffix);
+        QString dest = tr("%1/%2").arg(
+            qApp->applicationDirPath()).arg(file);
+
+        if (!copyFile(source, dest))
         {
-            it.next();
+            QMessageBox::critical(this, tr("Updater Error"),
+                tr("Failed to patch %1").arg(file));
 
-            QString file = it.key();
-            QString suffix = it.value();
-
-            QString source = tr("%1/%2.%3").arg(
-                qApp->applicationDirPath()).arg(file).arg(suffix);
-            QString dest = tr("%1/%2").arg(
-                qApp->applicationDirPath()).arg(file);
-
-            if( !copyFile(source, dest) )
-            {
-                QMessageBox::critical(this, tr("Updater Error"),
-                    tr("Failed to patch %1").arg(file));
-
-                return qApp->quit();
-            }
+            return qApp->quit();
         }
     }
 
@@ -438,7 +456,7 @@ void Updater::closeEvent(QCloseEvent *evt)
 void Updater::showSettings()
 {
 #ifdef Q_OS_WIN32
-    QProcess::startDetached("ImagineOption.exe");
+    (new Options(this))->show();
 #else
     QProcess::startDetached("env WINEPREFIX=\"/home/erikku/.wine\" wine "
         "\"C:\\AeriaGames\\MegaTen\\ImagineOption.exe\"");
@@ -460,6 +478,21 @@ void Updater::showDXDiag()
 
 void Updater::recheck()
 {
+    QString path = QString("%1/ImagineUpdate2.dat").arg(
+        qApp->applicationDirPath() );
+
+    QFile(path).remove();
+
+    path = QString("%1/ImagineUpdate2.ver").arg(
+        qApp->applicationDirPath() );
+
+    QFile(path).remove();
+
+    retry();
+}
+
+void Updater::retry()
+{
     mDone = false;
 
     bool block = mDL->blockSignals(true);
@@ -471,16 +504,7 @@ void Updater::recheck()
 
     mDL->blockSignals(block);
 
-    QString path = QString("%1/ImagineUpdate2.dat").arg(
-        qApp->applicationDirPath() );
-
-    QFile(path).remove();
-
-    path = QString("%1/ImagineUpdate2.ver").arg(
-        qApp->applicationDirPath() );
-
-    QFile(path).remove();
-
+    ui.settingsButton->setEnabled(false);
     ui.playButton->setEnabled(false);
 
     ui.fileProgress->setMaximum(100);
@@ -519,4 +543,29 @@ void Updater::errorMessage(const QString& msg)
     QMessageBox::critical(this, tr("Updater Error"), msg);
 
     qApp->quit();
+}
+
+void Updater::ReloadURL()
+{
+    QString settingsPath = "ImagineUpdate.dat";
+
+    if(QFileInfo("ImagineUpdate-user.dat").exists())
+    {
+        settingsPath = "ImagineUpdate-user.dat";
+    }
+
+    QSettings settings(settingsPath, QSettings::IniFormat);
+
+    mURL = settings.value("Setting/BaseURL1").toString();
+    mWebsite = settings.value("Setting/Information").toString();
+
+    ui.website->load(mWebsite);
+
+    ui.settingsButton->setEnabled(false);
+    ui.playButton->setEnabled(false);
+
+    mDL->setURL(mURL);
+    mDownloadThread.start();
+
+    ui.retranslateUi(this);
 }

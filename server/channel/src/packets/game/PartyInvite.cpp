@@ -8,7 +8,7 @@
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -27,13 +27,10 @@
 #include "Packets.h"
 
 // libcomp Includes
+#include <ErrorCodes.h>
 #include <ManagerPacket.h>
 #include <Packet.h>
 #include <PacketCodes.h>
-
-// objects Includes
-#include <AccountLogin.h>
-#include <CharacterLogin.h>
 
 // channel Includes
 #include "ChannelServer.h"
@@ -66,6 +63,7 @@ bool Parsers::PartyInvite::Parse(libcomp::ManagerPacket *pPacketManager,
         libcomp::Packet request;
         request.WritePacketCode(InternalPacketCode_t::PACKET_PARTY_UPDATE);
         request.WriteU8((int8_t)InternalPacketAction_t::PACKET_ACTION_YN_REQUEST);
+        request.WriteU8(0); // Not from recruit
         member->SavePacket(request, false);
         request.WriteString16Little(libcomp::Convert::Encoding_t::ENCODING_UTF8,
             targetName, true);
@@ -78,7 +76,7 @@ bool Parsers::PartyInvite::Parse(libcomp::ManagerPacket *pPacketManager,
         reply.WritePacketCode(ChannelToClientPacketCode_t::PACKET_PARTY_INVITE);
         reply.WriteString16Little(libcomp::Convert::Encoding_t::ENCODING_CP932,
             targetName, true);
-        reply.WriteU16Little(201);  // Offline
+        reply.WriteU16Little((uint16_t)PartyErrorCodes_t::INVALID_OR_OFFLINE);
         client->SendPacket(reply);
     }
 

@@ -4,11 +4,12 @@
  *
  * @author HACKfrost
  *
- * @brief Unknown. Request for "common switch" information.
+ * @brief Request from the client for character common switch settings. These
+ *  settings contain things like auto-recovery and auto-loot enabled.
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -46,16 +47,22 @@ bool Parsers::CommonSwitchInfo::Parse(libcomp::ManagerPacket *pPacketManager,
         return false;
     }
 
-    /// @todo: implement non-default values
+    auto client = std::dynamic_pointer_cast<ChannelClientConnection>(
+        connection);
+    auto state = client->GetClientState();
+    auto cState = state->GetCharacterState();
+    auto character = cState->GetEntity();
 
-    libcomp::String unknown;
-    
     libcomp::Packet reply;
-    reply.WritePacketCode(ChannelToClientPacketCode_t::PACKET_COMMON_SWITCH_INFO);
-    reply.WriteString16Little(libcomp::Convert::ENCODING_UTF8,
-        unknown, true);
+    reply.WritePacketCode(
+        ChannelToClientPacketCode_t::PACKET_COMMON_SWITCH_INFO);
+    reply.WriteU16Little((uint16_t)character->CommonSwitchCount());
+    for(int8_t byte : character->GetCommonSwitch())
+    {
+        reply.WriteS8(byte);
+    }
 
-    connection->SendPacket(reply);
+    client->SendPacket(reply);
 
     return true;
 }

@@ -8,7 +8,7 @@
  *
  * This file is part of the Lobby Server (lobby).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -51,24 +51,30 @@ bool ManagerClientPacket::ValidateConnectionState(const std::shared_ptr<
     auto state = client->GetClientState();
 
     bool valid = false;
+
     switch((ClientToLobbyPacketCode_t)commandCode)
     {
         case ClientToLobbyPacketCode_t::PACKET_LOGIN:
+        {
             valid = true;
             break;
+        }
         case ClientToLobbyPacketCode_t::PACKET_AUTH:
-            if(!(valid = state->GetLoggedIn()))
-            {
-                LOG_ERROR("Client connection attempted to authenticate without logging in.\n");
-            }
+        {
+            valid = true;
             break;
+        }
         default:
-            if(!(valid = state->GetAuthenticated() && state->GetLoggedIn()))
+        {
+            valid = state->GetAuthenticated();
+
+            if(!valid)
             {
-                LOG_ERROR("Client connection attempted to handle a request packet"
-                    " without authenticating and logging in first.\n");
+                LOG_ERROR("Client connection attempted to handle a request "
+                    "packet without authenticating and logging in first.\n");
             }
             break;
+        }
     }
 
     return valid;

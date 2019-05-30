@@ -9,7 +9,7 @@
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -28,6 +28,8 @@
 #include "Packets.h"
 
 // libcomp Includes
+#include <DefinitionManager.h>
+#include <Log.h>
 #include <ManagerPacket.h>
 #include <Packet.h>
 #include <PacketCodes.h>
@@ -36,10 +38,12 @@
 #include <AccountWorldData.h>
 #include <Item.h>
 #include <ItemBox.h>
+#include <MiShopProductData.h>
 #include <PostItem.h>
 
 // channel Includes
 #include "ChannelServer.h"
+#include "CharacterManager.h"
 
 using namespace channel;
 
@@ -53,82 +57,43 @@ bool Parsers::PostItem::Parse(libcomp::ManagerPacket *pPacketManager,
     }
 
     auto server = std::dynamic_pointer_cast<ChannelServer>(pPacketManager->GetServer());
+    auto definitionManager = server->GetDefinitionManager();
+
     auto client = std::dynamic_pointer_cast<ChannelClientConnection>(connection);
     auto state = client->GetClientState();
-    auto worldDB = server->GetWorldDatabase();
+    auto lobbyDB = server->GetLobbyDatabase();
 
     int32_t postID = p.ReadS32Little();
-    int32_t unknown = p.ReadS32Little();
-    (void)unknown;
-
-    // Always reload the post
-    auto worldData = objects::AccountWorldData::LoadAccountWorldDataByAccount(worldDB,
-        state->GetAccountUID());
+    int32_t targetSlot = p.ReadS32Little();
+    (void)targetSlot;
 
     auto itemUUID = state->GetLocalObjectUUID(postID);
 
     bool success = false;
     if(!itemUUID.IsNull())
     {
-        size_t idx = 0;
-        std::shared_ptr<objects::PostItem> postItem;
-        for(idx = 0; idx < worldData->PostCount(); idx++)
-        {
-            if(worldData->GetPost(idx).GetUUID() == itemUUID)
-            {
-                postItem = worldData->GetPost(idx).Get();
-                break;
-            }
-        }
+        auto postItem = libcomp::PersistentObject::LoadObjectByUUID<objects::PostItem>(lobbyDB,
+            itemUUID);
+        auto productData = postItem
+            ? definitionManager->GetShopProductData(postItem->GetType()) : nullptr;
 
-        if(postItem)
+        if(productData)
         {
-            auto inventory = state->GetCharacterState()->GetEntity()
-                ->GetItemBoxes(0).Get();
             auto characterManager = server->GetCharacterManager();
-            auto newItem = characterManager->GenerateItem(postItem->GetType(), 1);
 
-            int8_t nextSlot = -1;
-            for(size_t i = 0; i < 50; i++)
+            // Since the character and lobby are on different servers, we cannot
+            // batch this up into a single transaction. The loss of a CP item from
+            // the post is more damaging to the player than a server caused duplication
+            // so only delete the post item after the item has been created.
+            std::unordered_map<uint32_t, uint32_t> items;
+            items[productData->GetItem()] = productData->GetStack();
+            success = characterManager->AddRemoveItems(client, items, true);
+            if(success && !postItem->Delete(lobbyDB))
             {
-                if(inventory->GetItems(i).IsNull())
-                {
-                    nextSlot = (int8_t)i;
-                    break;
-                }
-            }
-            
-            if(nextSlot != -1)
-            {
-                state->SetObjectID(newItem->GetUUID(),
-                    server->GetNextObjectID());
-
-                auto changes = libcomp::DatabaseChangeSet::Create();
-
-                newItem->SetItemBox(inventory);
-                newItem->SetBoxSlot(nextSlot);
-                inventory->SetItems((size_t)nextSlot, newItem);
-                worldData->RemovePost(idx);
-
-                changes->Insert(newItem);
-                changes->Update(inventory);
-                changes->Update(worldData);
-                changes->Delete(postItem);
-
-                if(!worldDB->ProcessChangeSet(changes))
-                {
-                    LOG_ERROR("Post item retrieval failed to save.\n");
-                    state->SetLogoutSave(true);
-                    client->Close();
-                }
-                else
-                {
-                    success = true;
-
-                    std::list<uint16_t> updatedSlots = { (uint16_t)nextSlot };
-                    characterManager->SendItemBoxData(client, inventory,
-                        updatedSlots);
-                }
+                // If this fails we don't have a good way to recover, disconnect
+                // the player so they don't get into an invalid state
+                LOG_ERROR("Post item retrieval failed to save.\n");
+                client->Close();
             }
         }
     }

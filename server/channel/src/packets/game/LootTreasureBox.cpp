@@ -9,7 +9,7 @@
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -38,6 +38,7 @@
 
 // channel Includes
 #include "ChannelServer.h"
+#include "CharacterManager.h"
 
 using namespace channel;
 
@@ -67,7 +68,10 @@ bool Parsers::LootTreasureBox::Parse(libcomp::ManagerPacket *pPacketManager,
     reply.WriteS32Little(lootEntityID);
 
     auto lState = zone ? zone->GetLootBox(lootEntityID) : nullptr;
-    if(lState)
+    auto lBox = lState ? lState->GetEntity() : nullptr;
+    if(lBox && ((lBox->ValidLooterIDsCount() == 0 &&
+        lBox->GetType() != objects::LootBox::Type_t::BOSS_BOX) ||
+        lBox->ValidLooterIDsContains(state->GetWorldCID())))
     {
         reply.WriteS8(0);   // Success
 

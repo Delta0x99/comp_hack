@@ -8,7 +8,7 @@
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -69,6 +69,26 @@ public:
      *  the player character
      */
     void SetTalkPoints(int32_t entityID, const std::pair<uint8_t, uint8_t>& points);
+
+    virtual std::shared_ptr<objects::EnemyBase> GetEnemyBase() const;
+
+    virtual uint8_t RecalculateStats(libcomp::DefinitionManager* definitionManager,
+        std::shared_ptr<objects::CalculatedEntityState> calcState = nullptr);
+
+    virtual std::set<uint32_t> GetAllSkills(
+        libcomp::DefinitionManager* definitionManager, bool includeTokusei);
+
+    virtual uint8_t GetLNCType();
+
+    virtual int8_t GetGender();
+
+    /**
+     * Cast an EntityStateObject into an EnemyState. Useful for script
+     * bindings.
+     * @return Pointer to the casted EnemyState
+     */
+    static std::shared_ptr<EnemyState> Cast(
+        const std::shared_ptr<EntityStateObject>& obj);
 
 private:
     /// Player local entity IDs mapped to the enemy's current talk skill

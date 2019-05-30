@@ -8,7 +8,7 @@
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -44,6 +44,7 @@
 // channel Includes
 #include "ChannelServer.h"
 #include "ChannelClientConnection.h"
+#include "CharacterManager.h"
 
 using namespace channel;
 
@@ -69,69 +70,108 @@ bool Parsers::ItemMove::Parse(libcomp::ManagerPacket *pPacketManager,
     int8_t sourceType = p.ReadS8();
     int64_t sourceBoxID = p.ReadS64Little();
     int64_t itemID = p.ReadS64Little();
-
-    auto item = std::dynamic_pointer_cast<objects::Item>(
-        libcomp::PersistentObject::GetObjectByUUID(state->GetObjectUUID(itemID)));
-    if(nullptr == item)
-    {
-        LOG_ERROR("Item move failed due to unknown item ID.\n");
-        state->SetLogoutSave(true);
-        client->Close();
-        return true;
-    }
-
     int8_t destType = p.ReadS8();
     int64_t destBoxID = p.ReadS64Little();
     int16_t destSlot = p.ReadS16Little();
 
+    auto item = std::dynamic_pointer_cast<objects::Item>(
+        libcomp::PersistentObject::GetObjectByUUID(state->GetObjectUUID(itemID)));
     auto sourceBox = characterManager->GetItemBox(state, sourceType, sourceBoxID);
     auto destBox = characterManager->GetItemBox(state, destType, destBoxID);
+    size_t sourceSlot = item ? (size_t)item->GetBoxSlot() : 0;
 
-    if(nullptr != sourceBox && nullptr != destBox)
+    auto otherItem = destBox
+        ? destBox->GetItems((size_t)destSlot).Get() : nullptr;
+
+    bool fail = false;
+    if(!item || !sourceBox || !destBox ||
+        sourceBox->GetItems(sourceSlot).Get() != item)
     {
-        auto character = state->GetCharacterState()->GetEntity();
+        LOG_DEBUG(libcomp::String("ItemMove request failed. Notifying"
+            " requestor: %1\n").Arg(state->GetAccountUID().ToString()));
 
-        size_t sourceSlot = (size_t)item->GetBoxSlot();
-        if(sourceBox->GetItems(sourceSlot).Get() != item)
-        {
-            LOG_ERROR("Item move operation failed.\n");
-            state->SetLogoutSave(true);
-            client->Close();
-            return true;
-        }
-
-        if(destBox != sourceBox)
-        {
-            characterManager->UnequipItem(client, item);
-        }
-
-        // Swap the items (the destination could be a null object or a real item)
-        item->SetItemBox(destBox);
-        item->SetBoxSlot((int8_t)destSlot);
-
-        auto otherItem = destBox->GetItems((size_t)destSlot);
-        destBox->SetItems((size_t)destSlot, item);
-        sourceBox->SetItems(sourceSlot, otherItem);
-
-        auto dbChanges = libcomp::DatabaseChangeSet::Create(state->GetAccountUID());
-        dbChanges->Update(item);
-        dbChanges->Update(destBox);
-        dbChanges->Update(sourceBox);
-
-        if(!otherItem.IsNull())
-        {
-            otherItem->SetItemBox(sourceBox);
-            otherItem->SetBoxSlot((int8_t)sourceSlot);
-            dbChanges->Update(otherItem.Get());
-        }
-
-        server->GetWorldDatabase()->QueueChangeSet(dbChanges);
+        fail = true;
     }
-    else
+    else if(sourceBox != destBox)
     {
-        LOG_ERROR("Item move failed due to invalid source or destination box.\n");
-        state->SetLogoutSave(true);
-        client->Close();
+        // Make sure nothing is being moved into an expired box (allow
+        // reorganize because why not?)
+        uint32_t now = (uint32_t)std::time(0);
+        if((item && destBox->GetRentalExpiration() &&
+            destBox->GetRentalExpiration() < now) ||
+            (otherItem && sourceBox->GetRentalExpiration() &&
+                sourceBox->GetRentalExpiration() < now))
+        {
+            fail = true;
+        }
+    }
+
+    if(fail)
+    {
+        libcomp::Packet err;
+        err.WritePacketCode(ChannelToClientPacketCode_t::PACKET_ERROR_ITEM);
+        err.WriteS32Little((int32_t)
+            ClientToChannelPacketCode_t::PACKET_ITEM_MOVE);
+        err.WriteS32Little(-1);
+        err.WriteS8(1);
+        err.WriteS8(1);
+
+        client->SendPacket(err);
+
+        return true;
+    }
+
+    auto character = state->GetCharacterState()->GetEntity();
+
+    bool sameBox = destBox == sourceBox;
+    if(!sameBox)
+    {
+        characterManager->UnequipItem(client, item);
+        if(otherItem)
+        {
+            characterManager->UnequipItem(client, otherItem);
+        }
+    }
+
+    // Swap the items (the destination could be a null object or a real item)
+    item->SetItemBox(destBox->GetUUID());
+    item->SetBoxSlot((int8_t)destSlot);
+
+    destBox->SetItems((size_t)destSlot, item);
+    sourceBox->SetItems(sourceSlot, otherItem);
+
+    auto dbChanges = libcomp::DatabaseChangeSet::Create(state
+        ->GetAccountUID());
+    dbChanges->Update(item);
+    dbChanges->Update(destBox);
+    dbChanges->Update(sourceBox);
+
+    if(otherItem)
+    {
+        otherItem->SetItemBox(sourceBox->GetUUID());
+        otherItem->SetBoxSlot((int8_t)sourceSlot);
+        dbChanges->Update(otherItem);
+    }
+
+    server->GetWorldDatabase()->QueueChangeSet(dbChanges);
+
+    // The client will handle moves just fine on its own for the most part but
+    // certain simultaneous actions will cause some weirdness without sending
+    // the updated slots back
+    std::list<uint16_t> slots = { (uint16_t)sourceSlot };
+    if(sameBox)
+    {
+        slots.push_back((uint16_t)destSlot);
+    }
+
+    characterManager->SendItemBoxData(client, sourceBox, slots, false);
+
+    if(!sameBox)
+    {
+        slots.clear();
+        slots.push_back((uint16_t)destSlot);
+
+        characterManager->SendItemBoxData(client, destBox, slots, true);
     }
 
     return true;

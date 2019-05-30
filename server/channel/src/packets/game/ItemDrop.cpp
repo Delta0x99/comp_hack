@@ -8,7 +8,7 @@
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -44,6 +44,7 @@
 // channel Includes
 #include "ChannelServer.h"
 #include "ChannelClientConnection.h"
+#include "CharacterManager.h"
 
 using namespace channel;
 
@@ -53,20 +54,25 @@ void DropItem(const std::shared_ptr<ChannelServer> server,
 {
     auto state = client->GetClientState();
     auto character = state->GetCharacterState()->GetEntity();
-    auto item = std::dynamic_pointer_cast<objects::Item>(
-        libcomp::PersistentObject::GetObjectByUUID(
-            state->GetObjectUUID(itemID)));
 
-    if(nullptr == item)
-    {
-        return;
-    }
+    auto uuid = state->GetObjectUUID(itemID);
 
-    auto itemBox = item->GetItemBox().Get();
-    if(nullptr != itemBox)
+    std::shared_ptr<objects::Item> item;
+    std::shared_ptr<objects::ItemBox> itemBox;
+
+    if(!uuid.IsNull() &&
+        (item = std::dynamic_pointer_cast<objects::Item>(
+            libcomp::PersistentObject::GetObjectByUUID(uuid))) &&
+        (itemBox = std::dynamic_pointer_cast<objects::ItemBox>(
+            libcomp::PersistentObject::GetObjectByUUID(item->GetItemBox()))))
     {
+        int8_t slot = item->GetBoxSlot();
+
         server->GetCharacterManager()->UnequipItem(client, item);
-        itemBox->SetItems((size_t)item->GetBoxSlot(), NULLUUID);
+        itemBox->SetItems((size_t)slot, NULLUUID);
+
+        server->GetCharacterManager()->SendItemBoxData(client, itemBox,
+            { (uint16_t)slot });
 
         auto dbChanges = libcomp::DatabaseChangeSet::Create(state->GetAccountUID());
         dbChanges->Update(itemBox);
@@ -75,8 +81,18 @@ void DropItem(const std::shared_ptr<ChannelServer> server,
     }
     else
     {
-        LOG_ERROR(libcomp::String("Item drop operation failed due to unknown supplied"
-            " item ID on character: %1\n").Arg(character->GetUUID().ToString()));
+        LOG_DEBUG(libcomp::String("ItemDrop request failed. Notifying"
+            " requestor: %1\n").Arg(state->GetAccountUID().ToString()));
+
+        libcomp::Packet err;
+        err.WritePacketCode(ChannelToClientPacketCode_t::PACKET_ERROR_ITEM);
+        err.WriteS32Little((int32_t)
+            ClientToChannelPacketCode_t::PACKET_ITEM_DROP);
+        err.WriteS32Little(-1);
+        err.WriteS8(0);
+        err.WriteS8(0);
+
+        client->SendPacket(err);
     }
 }
 
@@ -93,13 +109,6 @@ bool Parsers::ItemDrop::Parse(libcomp::ManagerPacket *pPacketManager,
     auto client = std::dynamic_pointer_cast<ChannelClientConnection>(connection);
 
     int64_t itemID = p.ReadS64Little();
-    auto uuid = client->GetClientState()->GetObjectUUID(itemID);
-
-    if(uuid.IsNull() || nullptr == std::dynamic_pointer_cast<objects::Item>(
-        libcomp::PersistentObject::GetObjectByUUID(uuid)))
-    {
-        return false;
-    }
 
     server->QueueWork(DropItem, server, client, itemID);
 

@@ -8,7 +8,7 @@
  *
  * This file is part of the COMP_hack Tester Library (libtester).
  *
- * Copyright (C) 2012-2017 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -45,7 +45,7 @@ class TestClient
 {
 public:
     static constexpr asio::steady_timer::duration DEFAULT_TIMEOUT =
-        std::chrono::seconds(10);
+        std::chrono::seconds(60);
 
     enum class WaitStatus
     {
@@ -55,9 +55,12 @@ public:
     };
 
     TestClient();
-    ~TestClient();
+    TestClient(const TestClient& other);
+    virtual ~TestClient();
 
     bool Connect(uint16_t port);
+
+    void Disconnect();
 
     bool WaitEncrypted(double& waitTime, asio::steady_timer::duration
         timeout = DEFAULT_TIMEOUT);

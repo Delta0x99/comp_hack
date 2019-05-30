@@ -8,7 +8,7 @@
  *
  * This tool will update the game client.
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -104,7 +104,8 @@ QMap<QString, FileData*> Downloader::parseFileList(const QByteArray& d)
 }
 
 Downloader::Downloader(const QString& url, QObject *p) : QObject(p),
-    mTotalFiles(0), mCurrentReq(0), mHaveVersion(false), mCurrentFile(0)
+    mTotalFiles(0), mCurrentReq(0), mHaveVersion(false), mCurrentFile(0),
+    mActiveRetries(0)
 {
     mURL = url;
     mBare = false;
@@ -174,20 +175,43 @@ void Downloader::startUpdate()
     }
 }
 
-void Downloader::requestError()
+void Downloader::requestError(QNetworkReply::NetworkError code)
 {
-    mStatusCode = mCurrentReq->attribute(
-        QNetworkRequest::HttpStatusCodeAttribute).toInt();
-    QString phrase = mCurrentReq->attribute(
-        QNetworkRequest::HttpReasonPhraseAttribute).toString();
+    (void)code;
+
+    // If there was a timeout, try again before reporting the error.
+    if(mActiveRetries && QNetworkReply::TimeoutError == mCurrentReq->error())
+    {
+        startDownload(mActiveURL, mActivePath);
+        return;
+    }
+
+    auto errorString = mCurrentReq->errorString();
+
+    if(!errorString.isEmpty())
+    {
+#ifdef COMP_HACK_LOGSTDOUT
+        std::cout << "Download failed: "
+            << errorString.toLocal8Bit().data() << std::endl;
+#endif // COMP_HACK_LOGSTDOUT
+
+        expressFinish(tr("Download failed: %1").arg(errorString));
+    }
+    else
+    {
+        mStatusCode = mCurrentReq->attribute(
+            QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        QString phrase = mCurrentReq->attribute(
+            QNetworkRequest::HttpReasonPhraseAttribute).toString();
 
 #ifdef COMP_HACK_LOGSTDOUT
         std::cout << "Download failed: Server returned status code "
             << mStatusCode << " " << phrase.toLocal8Bit().data() << std::endl;
 #endif // COMP_HACK_LOGSTDOUT
 
-    expressFinish(tr("Download failed: Server returned status "
-        "code %1 %2").arg(mStatusCode).arg(phrase));
+        expressFinish(tr("Download failed: Server returned status "
+            "code %1 %2").arg(mStatusCode).arg(phrase));
+    }
 }
 
 void Downloader::requestReadyRead()
@@ -280,7 +304,7 @@ void Downloader::requestFinished()
 
     if(QNetworkReply::NoError != mCurrentReq->error())
     {
-        requestError();
+        requestError(mCurrentReq->error());
         mCurrentReq = 0;
         return;
     }
@@ -632,6 +656,17 @@ void Downloader::startDownload(const QString& url, const QString& path)
 {
     mStatusCode = 0;
 
+    if(mActiveURL == url || mActivePath == path)
+    {
+        mActiveRetries--;
+    }
+    else
+    {
+        mActiveRetries = 5;
+        mActiveURL = url;
+        mActivePath = path;
+    }
+
 #ifdef COMP_HACK_HEADLESS
     if( path.isEmpty() )
         std::cout << "Downloading: hashlist.dat" << std::endl;
@@ -649,7 +684,13 @@ void Downloader::startDownload(const QString& url, const QString& path)
 
     mCurrentReq = mConnection->get(request);
 
-    connect(mCurrentReq, SIGNAL(error()), this, SLOT(requestError()));
+    connect(mCurrentReq, SIGNAL(error(QNetworkReply::NetworkError)), this,
+        SLOT(requestError(QNetworkReply::NetworkError)));
     connect(mCurrentReq, SIGNAL(readyRead()), this, SLOT(requestReadyRead()));
     connect(mCurrentReq, SIGNAL(finished()), this, SLOT(requestFinished()));
+}
+
+void Downloader::setURL(const QString& url)
+{
+    mURL = url;
 }

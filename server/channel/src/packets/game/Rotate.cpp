@@ -8,7 +8,7 @@
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -39,6 +39,7 @@
 #include "ChannelClientConnection.h"
 #include "ChannelServer.h"
 #include "ClientState.h"
+#include "ZoneManager.h"
 
 using namespace channel;
 
@@ -60,11 +61,12 @@ bool Parsers::Rotate::Parse(libcomp::ManagerPacket *pPacketManager,
     auto eState = state->GetEntityState(entityID, false);
     if(nullptr == eState)
     {
-        LOG_ERROR(libcomp::String("Invalid entity ID received from a rotate request: %1\n")
-            .Arg(entityID));
-        return false;
+        LOG_ERROR(libcomp::String("Invalid entity ID received from a rotate"
+            " request: %1\n").Arg(state->GetAccountUID().ToString()));
+        client->Close();
+        return true;
     }
-    else if(!eState->Ready())
+    else if(!eState->Ready(true))
     {
         // Nothing to do, the entity is not currently active
         return true;
@@ -92,19 +94,26 @@ bool Parsers::Rotate::Parse(libcomp::ManagerPacket *pPacketManager,
     eState->SetOriginRotation(eState->GetCurrentRotation());
     eState->SetDestinationRotation(rotation);
 
-    auto zoneConnections = server->GetZoneManager()->GetZoneConnections(client, false);
-    if(zoneConnections.size() > 0)
+    // If the entity is still visible to others, relay info
+    if(eState->IsClientVisible())
     {
-        libcomp::Packet reply;
-        reply.WritePacketCode(ChannelToClientPacketCode_t::PACKET_ROTATE);
-        reply.WriteS32Little(entityID);
-        reply.WriteFloat(rotation);
+        auto zConnections = server->GetZoneManager()->GetZoneConnections(
+            client, false);
 
-        std::unordered_map<uint32_t, uint64_t> timeMap;
-        timeMap[reply.Size()] = startTime;
-        timeMap[reply.Size() + 4] = stopTime;
+        if(zConnections.size() > 0)
+        {
+            libcomp::Packet reply;
+            reply.WritePacketCode(ChannelToClientPacketCode_t::PACKET_ROTATE);
+            reply.WriteS32Little(entityID);
+            reply.WriteFloat(rotation);
 
-        ChannelClientConnection::SendRelativeTimePacket(zoneConnections, reply, timeMap);
+            RelativeTimeMap timeMap;
+            timeMap[reply.Size()] = startTime;
+            timeMap[reply.Size() + 4] = stopTime;
+
+            ChannelClientConnection::SendRelativeTimePacket(zConnections,
+                reply, timeMap);
+        }
     }
 
     return true;

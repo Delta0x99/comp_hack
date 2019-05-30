@@ -8,7 +8,7 @@
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -35,6 +35,9 @@
 #include "ChannelClientConnection.h"
 #include "ChannelServer.h"
 #include "CharacterManager.h"
+#include "MatchManager.h"
+#include "TokuseiManager.h"
+#include "ZoneManager.h"
 
 using namespace channel;
 
@@ -57,9 +60,11 @@ bool Parsers::FixObjectPosition::Parse(libcomp::ManagerPacket *pPacketManager,
     auto eState = state->GetEntityState(entityID);
     if(nullptr == eState)
     {
-        LOG_ERROR(libcomp::String("Invalid entity ID received from a fix object position"
-            " request: %1\n").Arg(entityID));
-        return false;
+        LOG_ERROR(libcomp::String("Invalid entity ID received from a fix"
+            " object position request: %1\n")
+            .Arg(state->GetAccountUID().ToString()));
+        client->Close();
+        return true;
     }
 
     float destX = p.ReadFloat();
@@ -90,16 +95,13 @@ bool Parsers::FixObjectPosition::Parse(libcomp::ManagerPacket *pPacketManager,
     zoneManager->BroadcastPacket(client, reply, false);
 
     auto dState = std::dynamic_pointer_cast<DemonState>(eState);
-    if(nullptr != dState)
+    auto zone = dState ? dState->GetZone() : nullptr;
+    if (dState && zone && !MatchManager::SpectatingMatch(client, zone) &&
+        dState->GetDisplayState() <= ActiveDisplayState_t::DATA_SENT)
     {
         // If a demon is being placed, it will have already been described to the
         // the client by this point so create and show it now.
-        auto zone = zoneManager->GetZoneInstance(client);
-        if(zone)
-        {
-            zoneManager->PopEntityForZoneProduction(zone, dState->GetEntityID(), 2);
-            zoneManager->ShowEntityToZone(zone, dState->GetEntityID());
-        }
+        zoneManager->ShowDemonToZone(zone, client);
     }
 
     return true;

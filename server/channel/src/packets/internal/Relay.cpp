@@ -9,7 +9,7 @@
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -35,6 +35,8 @@
 
 // channel Includes
 #include "ChannelServer.h"
+#include "ChatManager.h"
+#include "ManagerConnection.h"
 
 using namespace channel;
 
@@ -92,7 +94,7 @@ bool Parsers::Relay::Parse(libcomp::ManagerPacket *pPacketManager,
                     // Ignore the names retrieved in case the character
                     // name was not even a real player
                     libcomp::String targetName = p.ReadString16Little(
-                        libcomp::Convert::Encoding_t::ENCODING_UTF8, true);
+                        state->GetClientStringEncoding(), true);
 
                     // Tell failures are parsed client side as an empty tell
                     // message from the requested target

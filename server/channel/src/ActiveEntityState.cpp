@@ -8,7 +8,7 @@
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -29,14 +29,17 @@
 // libcomp Includes
 #include <Constants.h>
 #include <DefinitionManager.h>
+#include <Randomizer.h>
 #include <ServerConstants.h>
-#include <ServerDataManager.h>
 
 // C++ Standard Includes
 #include <cmath>
 #include <limits>
 
 // objects Includes
+#include <ActivatedAbility.h>
+#include <Ally.h>
+#include <CalculatedEntityState.h>
 #include <Character.h>
 #include <Clan.h>
 #include <Demon.h>
@@ -51,17 +54,22 @@
 #include <MiEffectData.h>
 #include <MiGrowthData.h>
 #include <MiItemData.h>
-#include <MiNPCBasicData.h>
 #include <MiSkillData.h>
 #include <MiSkillItemStatusCommonData.h>
 #include <MiStatusBasicData.h>
 #include <MiStatusData.h>
+#include <Spawn.h>
+#include <Tokusei.h>
+#include <TokuseiAspect.h>
+#include <TokuseiCorrectTbl.h>
 
 // channel Includes
 #include "AIState.h"
 #include "ChannelServer.h"
 #include "CharacterManager.h"
+#include "TokuseiManager.h"
 #include "Zone.h"
+#include "ZoneInstance.h"
 
 using namespace channel;
 
@@ -70,32 +78,33 @@ namespace libcomp
     template<>
     ScriptEngine& ScriptEngine::Using<ActiveEntityState>()
     {
-        if(!BindingExists("ActiveEntityState"))
+        if(!BindingExists("ActiveEntityState", true))
         {
-            Using<AIState>();
             Using<objects::ActiveEntityStateObject>();
+            Using<objects::EnemyBase>();
 
             // Active entities can rotate or stop directly from the script
             // but movement must be handled via the AIManager
             Sqrat::DerivedClass<ActiveEntityState,
-                objects::ActiveEntityStateObject> binding(mVM, "ActiveEntityState");
+                objects::ActiveEntityStateObject,
+                Sqrat::NoConstructor<ActiveEntityState>> binding(mVM, "ActiveEntityState");
             binding
-                .Func<void (ActiveEntityState::*)(float, uint64_t)>(
-                    "Rotate", &ActiveEntityState::Rotate)
-                .Func<void (ActiveEntityState::*)(uint64_t)>(
-                    "Stop", &ActiveEntityState::Stop)
-                .Func<bool (ActiveEntityState::*)(void) const>(
-                    "IsMoving", &ActiveEntityState::IsMoving)
-                .Func<bool (ActiveEntityState::*)(void) const>(
-                    "IsRotating", &ActiveEntityState::IsRotating)
-                .Func<std::shared_ptr<AIState>(ActiveEntityState::*)() const>(
-                    "GetAIState", &ActiveEntityState::GetAIState)
-                .Func<uint64_t (ActiveEntityState::*)(const libcomp::String&)>(
-                    "GetActionTime", &ActiveEntityState::GetActionTime)
-                .Func<void (ActiveEntityState::*)(const libcomp::String&, uint64_t)>(
-                    "SetActionTime", &ActiveEntityState::SetActionTime);
+                .Func("GetCoreStats", &ActiveEntityState::GetCoreStats)
+                .Func("GetZone", &ActiveEntityState::GetZone)
+                .Func("Rotate", &ActiveEntityState::Rotate)
+                .Func("Stop", &ActiveEntityState::Stop)
+                .Func("IsMoving", &ActiveEntityState::IsMoving)
+                .Func("IsRotating", &ActiveEntityState::IsRotating)
+                .Func("GetAIState", &ActiveEntityState::GetAIState)
+                .Func("GetWorldCID", &ActiveEntityState::GetWorldCID)
+                .Func("GetEnemyBase", &ActiveEntityState::GetEnemyBase)
+                .Func("StatusEffectActive", &ActiveEntityState::StatusEffectActive)
+                .Func("StatusEffectTimeLeft", &ActiveEntityState::StatusEffectTimeLeft);
 
             Bind<ActiveEntityState>("ActiveEntityState", binding);
+
+            Using<AIState>();
+            Using<Zone>();
         }
 
         return *this;
@@ -104,23 +113,38 @@ namespace libcomp
 
 ActiveEntityState::ActiveEntityState() : mCurrentZone(0),
     mEffectsActive(false), mAlive(true), mInitialCalc(false),
-    mLastRefresh(0), mNextActivatedAbilityID(1)
+    mCloaked(false), mLastRefresh(0), mNextRegenSync(0), mNextUpkeep(0),
+    mNextActivatedAbilityID(1)
 {
 }
 
-ActiveEntityState::ActiveEntityState(const ActiveEntityState& other)
+int16_t ActiveEntityState::GetCorrectValue(CorrectTbl tableID,
+    std::shared_ptr<objects::CalculatedEntityState> calcState)
 {
-    (void)other;
-}
-
-int16_t ActiveEntityState::GetCorrectValue(CorrectTbl tableID)
-{
-    return GetCorrectTbl((size_t)tableID);
+    return (calcState ? calcState : GetCalculatedState())
+        ->GetCorrectTbl((size_t)tableID);
 }
 
 const libobjgen::UUID ActiveEntityState::GetEntityUUID()
 {
     return NULLUUID;
+}
+
+int32_t ActiveEntityState::GetWorldCID()
+{
+    auto state = ClientState::GetEntityClientState(GetEntityID());
+    return state ? state->GetWorldCID() : 0;
+}
+
+bool ActiveEntityState::HasActiveEvent() const
+{
+    auto state = ClientState::GetEntityClientState(GetEntityID());
+    return state && state->HasActiveEvent();
+}
+
+std::shared_ptr<objects::EnemyBase> ActiveEntityState::GetEnemyBase() const
+{
+    return nullptr;
 }
 
 void ActiveEntityState::Move(float xPos, float yPos, uint64_t now)
@@ -160,7 +184,7 @@ void ActiveEntityState::Rotate(float rot, uint64_t now)
 
         // One complete rotation takes 1650ms at 300.0f speed
         uint64_t addMicro = (uint64_t)(495000.0f /
-            GetMovementSpeed(mOpponentIDs.size() > 0)) * 1000;
+            GetMovementSpeed()) * 1000;
         SetDestinationTicks(now + addMicro);
     }
 }
@@ -195,16 +219,21 @@ bool ActiveEntityState::IsRotating() const
 
 bool ActiveEntityState::CanAct()
 {
-    return mAlive && (CanMove() || CurrentSkillsCount() > 0);
+    return mAlive && !StatusRestrictActCount() &&
+        !GetStatusTimes(STATUS_KNOCKBACK) &&
+        !GetStatusTimes(STATUS_HIT_STUN) &&
+        (CanMove() || CurrentSkillsCount() > 0);
 }
 
-bool ActiveEntityState::CanMove()
+bool ActiveEntityState::CanMove(bool ignoreSkill)
 {
-    if(!mAlive || GetCorrectValue(CorrectTbl::MOVE1) == 0)
+    if(!mAlive || GetCorrectValue(CorrectTbl::MOVE1) == 0 ||
+        StatusRestrictActCount() > 0 || StatusRestrictMoveCount() > 0)
     {
         return false;
     }
 
+    bool charging = false;
     auto statusTimes = GetStatusTimes();
     if(statusTimes.size() > 0)
     {
@@ -213,12 +242,40 @@ bool ActiveEntityState::CanMove()
         {
             if(statusTimes.find(lockState) != statusTimes.end())
             {
-                return false;
+                if(lockState == STATUS_CHARGING)
+                {
+                    charging = true;
+                }
+                else
+                {
+                    return false;
+                }
             }
         }
     }
 
+    if(!ignoreSkill)
+    {
+        auto activated = GetActivatedAbility();
+        if(activated &&
+            ((charging && activated->GetChargeMoveSpeed() == 0.f) ||
+             (!charging && activated->GetChargeCompleteMoveSpeed() == 0.f)))
+        {
+            return false;
+        }
+    }
+
     return true;
+}
+
+bool ActiveEntityState::SameFaction(std::shared_ptr<ActiveEntityState> other,
+    bool ignoreGroup)
+{
+    return GetFaction() == other->GetFaction() &&
+        (ignoreGroup ||
+        // Ignore neutral within groups
+        GetFactionGroup() == 0 || other->GetFactionGroup() == 0 ||
+        GetFactionGroup() == other->GetFactionGroup());
 }
 
 float ActiveEntityState::CorrectRotation(float rot)
@@ -242,16 +299,61 @@ float ActiveEntityState::GetDistance(float x, float y, bool squared)
     return squared ? dSquared : std::sqrt(dSquared);
 }
 
-float ActiveEntityState::GetMovementSpeed(bool altSpeed)
+float ActiveEntityState::GetMovementSpeed(bool ignoreSkill,
+    bool altSpeed)
 {
-    return (float)(GetCorrectValue(
-        altSpeed ? CorrectTbl::MOVE1 : CorrectTbl::MOVE2) * 10.f);
+    int16_t speed = 0;
+    auto activated = ignoreSkill ? nullptr : GetActivatedAbility();
+    if(altSpeed)
+    {
+        // Get alternate "walk" speed
+        speed = GetCorrectValue(CorrectTbl::MOVE1);
+    }
+    else if(activated)
+    {
+        // Current skill is always updated with combat state and is not
+        // set on the entity without a charge time (even if its "now"),
+        // therefore we only have the concept of charged or not
+        if(activated->GetChargedTime() < ChannelServer::GetServerTime())
+        {
+            return activated->GetChargeCompleteMoveSpeed();
+        }
+        else
+        {
+            return activated->GetChargeMoveSpeed();
+        }
+    }
+    else if(GetCombatTimeOut() &&
+        !GetCalculatedState()->ExistingTokuseiAspectsContains(
+            (int8_t)TokuseiAspectType::COMBAT_SPEED_NULL))
+    {
+        // If in combat or using a skill and combat speed is not nullified
+        // (which is a non-conditional tokusei), get the combat run speed
+        // which should be equal to the default run speed of the entity
+        speed = GetCombatRunSpeed();
+    }
+    else
+    {
+        // Get the normal run speed
+        speed = GetCorrectValue(CorrectTbl::MOVE2);
+    }
+
+    return (float)(speed + GetSpeedBoost()) * 10.f;
+}
+
+uint32_t ActiveEntityState::GetHitboxSize() const
+{
+    auto devilData = GetDevilData();
+    return devilData ? devilData->GetBattleData()->GetHitboxSize()
+        : PLAYER_HITBOX_SIZE;
 }
 
 void ActiveEntityState::RefreshCurrentPosition(uint64_t now)
 {
     if(now != mLastRefresh)
     {
+        std::lock_guard<std::mutex> lock(mLock);
+
         uint64_t destTicks = GetDestinationTicks();
         if(destTicks < mLastRefresh)
         {
@@ -294,8 +396,9 @@ void ActiveEntityState::RefreshCurrentPosition(uint64_t now)
             uint64_t originTicks = GetOriginTicks();
 
             uint64_t elapsed = now - originTicks;
-            uint64_t total = destTicks - originTicks;
-            if(total == 0)
+            uint64_t total = (destTicks > originTicks)
+                ? destTicks - originTicks : 0;
+            if(total == 0 || now < originTicks)
             {
                 SetCurrentX(destX);
                 SetCurrentY(destY);
@@ -328,17 +431,99 @@ void ActiveEntityState::RefreshCurrentPosition(uint64_t now)
     }
 }
 
+bool ActiveEntityState::UpdatePendingCombatants(int32_t entityID,
+    uint64_t executeTime)
+{
+    bool valid = false;
+
+    std::lock_guard<std::mutex> lock(mLock);
+    if(PendingCombatantsCount())
+    {
+        // No entity should ever have 2 values
+        RemovePendingCombatants(entityID);
+
+        auto zone = GetZone();
+        if(zone)
+        {
+            // Remove any invalid entries
+            int64_t selfID = (int64_t)GetEntityID();
+            auto pending = GetPendingCombatants();
+            for(auto& pair : pending)
+            {
+                // Combatants are only valid if they're still in the zone
+                // and still have an ability targeting this entity with the
+                // same execution timestamp registered here and there is no
+                // error on the skill
+                auto eState = zone->GetActiveEntity(pair.first);
+                auto activated = eState
+                    ? eState->GetActivatedAbility() : nullptr;
+                if(!eState || !activated ||
+                    activated->GetTargetObjectID() != selfID ||
+                    activated->GetExecutionRequestTime() != pair.second ||
+                    activated->GetErrorCode() != -1)
+                {
+                    RemovePendingCombatants(pair.first);
+                }
+            }
+            
+        }
+
+        if(!PendingCombatantsCount())
+        {
+            // None left, always valid
+            valid = true;
+        }
+        else
+        {
+            // Check against earliest time
+            uint64_t first = 0;
+            for(auto& pair : GetPendingCombatants())
+            {
+                if(!first || pair.second < first)
+                {
+                    first = pair.second;
+                }
+            }
+
+            // The simultaneous hit window is 100ms
+            if(!first || first >= executeTime ||
+                executeTime - first < 100000ULL)
+            {
+                valid = true;
+            }
+        }
+    }
+    else
+    {
+        // No other combatants, always valid
+        valid = true;
+    }
+
+    if(valid)
+    {
+        SetPendingCombatants(entityID, executeTime);
+    }
+
+    return valid;
+}
+
 void ActiveEntityState::ExpireStatusTimes(uint64_t now)
 {
     auto statusTimes = GetStatusTimes();
-    if(statusTimes.size() > 0)
+    for(auto& pair : statusTimes)
     {
-        for(auto pair : statusTimes)
+        if(pair.second != 0 && pair.second <= now)
         {
-            if(pair.second != 0 && pair.second <= now)
-            {
-                RemoveStatusTimes(pair.first);
-            }
+            RemoveStatusTimes(pair.first);
+        }
+    }
+
+    auto cooldowns = GetSkillCooldowns();
+    for(auto& pair : cooldowns)
+    {
+        if(pair.second <= now)
+        {
+            RemoveSkillCooldowns(pair.first);
         }
     }
 }
@@ -353,25 +538,8 @@ void ActiveEntityState::SetAIState(const std::shared_ptr<AIState>& aiState)
     mAIState = aiState;
 }
 
-uint64_t ActiveEntityState::GetActionTime(const libcomp::String& action)
-{
-    std::lock_guard<std::mutex> lock(mLock);
-    auto it = mActionTimes.find(action.C());
-    if(it != mActionTimes.end())
-    {
-        return it->second;
-    }
-
-    return 0;
-}
-
-void ActiveEntityState::SetActionTime(const libcomp::String& action, uint64_t time)
-{
-    std::lock_guard<std::mutex> lock(mLock);
-    mActionTimes[action.C()] = time;
-}
-
-void ActiveEntityState::RefreshKnockback(uint64_t now)
+float ActiveEntityState::RefreshKnockback(uint64_t time, float recoveryBoost,
+    bool setValue)
 {
     std::lock_guard<std::mutex> lock(mLock);
 
@@ -379,8 +547,9 @@ void ActiveEntityState::RefreshKnockback(uint64_t now)
     float kbMax = (float)GetCorrectValue(CorrectTbl::KNOCKBACK_RESIST);
     if(kb < kbMax)
     {
-        // Knockback refreshes at a rate of 15/s (or 0.015/ms)
-        kb = kb + (float)((double)(now - GetKnockbackTicks()) * 0.001 * 0.015);
+        // Knockback refreshes at a rate of 12.5/s (or 0.0125/ms)
+        kb = kb + (float)((double)(time - GetKnockbackTicks()) * 0.001 *
+            (0.0125 * (1.0 + (double)recoveryBoost)));
         if(kb > kbMax)
         {
             kb = kbMax;
@@ -391,29 +560,42 @@ void ActiveEntityState::RefreshKnockback(uint64_t now)
             kb = 0.f;
         }
 
-        SetKnockbackResist(kb);
-        if(kb == kbMax)
+        if(setValue)
         {
-            // Reset to no time
-            SetKnockbackTicks(0);
+            SetKnockbackResist(kb);
+            if(kb == kbMax)
+            {
+                // Reset to no time
+                SetKnockbackTicks(0);
+            }
         }
     }
+
+    return kb;
 }
 
-float ActiveEntityState::UpdateKnockback(uint64_t now, float decrease)
+float ActiveEntityState::UpdateKnockback(uint64_t now, float decrease,
+    float recoveryBoost)
 {
     // Always get up to date first
-    RefreshKnockback(now);
+    RefreshKnockback(now, recoveryBoost);
 
     std::lock_guard<std::mutex> lock(mLock);
 
     auto kb = GetKnockbackResist();
     if(kb > 0)
     {
-        kb -= decrease;
-        if(kb <= 0)
+        if(decrease == -1.f)
         {
-            kb = 0.f;
+            kb = 0;
+        }
+        else
+        {
+            kb -= decrease;
+            if(kb <= 0)
+            {
+                kb = 0.f;
+            }
         }
 
         SetKnockbackResist(kb);
@@ -444,11 +626,12 @@ bool ActiveEntityState::SetHPMP(int32_t hp, int32_t mp, bool adjust,
     bool canOverflow)
 {
     int32_t hpAdjusted, mpAdjusted;
-    return SetHPMP(hp, mp, adjust, canOverflow, hpAdjusted, mpAdjusted);
+    return SetHPMP(hp, mp, adjust, canOverflow, 0, hpAdjusted, mpAdjusted);
 }
 
 bool ActiveEntityState::SetHPMP(int32_t hp, int32_t mp, bool adjust,
-    bool canOverflow, int32_t& hpAdjusted, int32_t& mpAdjusted)
+    bool canOverflow, int32_t clenchChance, int32_t& hpAdjusted,
+    int32_t& mpAdjusted)
 {
     hpAdjusted = mpAdjusted = 0;
 
@@ -465,22 +648,24 @@ bool ActiveEntityState::SetHPMP(int32_t hp, int32_t mp, bool adjust,
     // If the amount of damage dealt can overflow, do not
     // use the actual damage dealt, allow it to go
     // over the actual amount dealt
-    if(canOverflow)
+    if(canOverflow && adjust)
     {
         hpAdjusted = hp;
         mpAdjusted = mp;
     }
 
+    int32_t startingHP = cs->GetHP();
+    int32_t startingMP = cs->GetMP();
     if(adjust)
     {
-        hp = (int32_t)(cs->GetHP() + hp);
-        mp = (int32_t)(cs->GetMP() + mp);
+        hp = (int32_t)(startingHP + hp);
+        mp = (int32_t)(startingMP + mp);
 
         if(!canOverflow)
         {
             // If the adjusted damage cannot overflow
             // stop it from doing so
-            if(cs->GetHP() && hp <= 0)
+            if(startingHP && hp <= 0)
             {
                 hp = 1;
             }
@@ -489,7 +674,17 @@ bool ActiveEntityState::SetHPMP(int32_t hp, int32_t mp, bool adjust,
                 hp = 0;
             }
         }
-        
+        else if(startingHP > 1 && hp <= 0 && clenchChance > 0)
+        {
+            if(clenchChance >= 10000 ||
+                RNG(int32_t, 1, 10000) <= clenchChance)
+            {
+                // Survived clench
+                hpAdjusted = -(startingHP - 1);
+                hp = 1;
+            }
+        }
+
         // Make sure we don't go under the limit
         if(hp < 0)
         {
@@ -501,31 +696,43 @@ bool ActiveEntityState::SetHPMP(int32_t hp, int32_t mp, bool adjust,
             mp = 0;
         }
     }
+    else
+    {
+        // Return exact HP/MP adjustment
+        if(hp >= 0)
+        {
+            hpAdjusted = hp - startingHP;
+        }
+
+        if(mp >= 0)
+        {
+            mpAdjusted = mp - startingMP;
+        }
+    }
 
     bool result = false;
-    bool returnDamaged = !adjust || !canOverflow;
     if(hp >= 0)
     {
         auto newHP = hp > maxHP ? maxHP : hp;
 
         // Update if the entity is alive or not
-        if(cs->GetHP() > 0 && newHP == 0)
+        if(startingHP > 0 && newHP == 0)
         {
             mAlive = false;
             Stop(ChannelServer::GetServerTime());
-            result = !returnDamaged;
+            result = true;
         }
-        else if(cs->GetHP() == 0 && newHP > 0)
+        else if(startingHP == 0 && newHP > 0)
         {
             mAlive = true;
-            result = !returnDamaged;
+            result = true;
         }
 
-        result |= returnDamaged && newHP != cs->GetHP();
+        result |= !canOverflow && newHP != startingHP;
         
         if(!canOverflow)
         {
-            hpAdjusted = (int32_t)(newHP - cs->GetHP());
+            hpAdjusted = (int32_t)(newHP - startingHP);
         }
 
         cs->SetHP(newHP);
@@ -534,11 +741,11 @@ bool ActiveEntityState::SetHPMP(int32_t hp, int32_t mp, bool adjust,
     if(mp >= 0)
     {
         auto newMP = mp > maxMP ? maxMP : mp;
-        result |= returnDamaged && newMP != cs->GetMP();
+        result |= !canOverflow && newMP != startingMP;
         
         if(!canOverflow)
         {
-            mpAdjusted = (int32_t)(newMP - cs->GetMP());
+            mpAdjusted = (int32_t)(newMP - startingMP);
         }
 
         cs->SetMP(newMP);
@@ -553,25 +760,56 @@ const std::unordered_map<uint32_t, std::shared_ptr<objects::StatusEffect>>&
     return mStatusEffects;
 }
 
+bool ActiveEntityState::StatusEffectActive(uint32_t effectType)
+{
+    std::lock_guard<std::mutex> lock(mLock);
+    auto it = mStatusEffects.find(effectType);
+    return it != mStatusEffects.end();
+}
+
+uint32_t ActiveEntityState::StatusEffectTimeLeft(uint32_t effectType)
+{
+    auto states = GetCurrentStatusEffectStates(0);
+    for(auto& pair : states)
+    {
+        if(pair.first->GetEffect() == effectType)
+        {
+            return pair.second;
+        }
+    }
+
+    return 0;
+}
+
 void ActiveEntityState::SetStatusEffects(
-    const std::list<std::shared_ptr<objects::StatusEffect>>& effects)
+    const std::list<std::shared_ptr<objects::StatusEffect>>& effects,
+    libcomp::DefinitionManager* definitionManager)
 {
     std::lock_guard<std::mutex> lock(mLock);
     mStatusEffects.clear();
+    mStatusEffectDefs.clear();
     mNRAShields.clear();
     mTimeDamageEffects.clear();
     mCancelConditions.clear();
     mNextEffectTimes.clear();
+    mNextRegenSync = 0;
+    mNextUpkeep = 0;
+
+    ClearStatusRestrictAct();
+    ClearStatusRestrictMove();
+    ClearStatusRestrictMagic();
+    ClearStatusRestrictSpecial();
+    ClearStatusRestrictTalk();
 
     RegisterNextEffectTime();
 
     for(auto effect : effects)
     {
-        mStatusEffects[effect->GetEffect()] = effect;
+        RegisterStatusEffect(effect, definitionManager);
     }
 }
 
-std::set<uint32_t> ActiveEntityState::AddStatusEffects(const AddStatusEffectMap& effects,
+std::set<uint32_t> ActiveEntityState::AddStatusEffects(const StatusEffectChanges& effects,
     libcomp::DefinitionManager* definitionManager, uint32_t now, bool queueChanges)
 {
     std::set<uint32_t> removes;
@@ -584,60 +822,48 @@ std::set<uint32_t> ActiveEntityState::AddStatusEffects(const AddStatusEffectMap&
     std::lock_guard<std::mutex> lock(mLock);
     for(auto ePair : effects)
     {
-        bool isReplace = ePair.second.second;
-        uint32_t effectType = ePair.first;
-        uint8_t stack = ePair.second.first;
+        bool isReplace = ePair.second.IsReplace;
+        uint32_t effectType = ePair.second.Type;
+        int8_t stack = ePair.second.Stack;
 
         auto def = definitionManager->GetStatusData(effectType);
         auto basic = def->GetBasic();
         auto cancel = def->GetCancel();
         auto maxStack = basic->GetMaxStack();
 
-        if(stack > maxStack)
+        if(stack > (int8_t)maxStack)
         {
-            stack = maxStack;
+            stack = (int8_t)maxStack;
         }
 
         bool add = true;
+        bool resetTime = false;
         std::shared_ptr<objects::StatusEffect> effect;
         std::shared_ptr<objects::StatusEffect> removeEffect;
         if(mStatusEffects.find(effectType) != mStatusEffects.end())
         {
-            // Effect exists alreadly, should we modify time/stack or remove?
+            // Effect exists already, should we modify time/stack or remove?
             auto existing = mStatusEffects[effectType];
+            resetTime = stack != 0;
 
             bool doReplace = isReplace;
             bool addStack = false;
-            bool resetTime = false;
             switch(basic->GetApplicationLogic())
             {
             case 0:
-                // Add always, replace only if higher/longer or zero (ex: sleep)
-                doReplace = isReplace && ((existing->GetStack() < stack) || !stack);
-                break;
-            case 1:
-                // Always set/add stack, reset time only if stack
-                // represents time (misc)
-                if(isReplace)
-                {
-                    existing->SetStack(stack);
-                    if(basic->GetStackType() == 1)
-                    {
-                        resetTime = true;
-                    }
-                }
-                else
-                {
-                    addStack = true;
-                }
+            case 1: // Differs during skill processing
+                // Always set/add stack
+                doReplace = isReplace && (((int8_t)
+                    existing->GetStack() < stack) || !stack);
+                addStack = !isReplace;
                 break;
             case 2:
-                // Always reset time, add old stack on add (ex: -kajas)
-                addStack = !isReplace;
-                resetTime = true;
+                // Always add unless stack is zero (ex: -kajas)
+                addStack = true;
+                doReplace = !stack;
                 break;
             case 3:
-                // Always reapply time and stack (ex: -karns)
+                // Always reapply stack (ex: -karns)
                 doReplace = resetTime = true;
                 break;
             default:
@@ -647,17 +873,30 @@ std::set<uint32_t> ActiveEntityState::AddStatusEffects(const AddStatusEffectMap&
 
             if(doReplace)
             {
-                existing->SetStack(stack);
+                if(stack < 0)
+                {
+                    existing->SetStack(0);
+                }
+                else
+                {
+                    existing->SetStack((uint8_t)stack);
+                }
             }
-            else if(addStack && existing->GetStack() < maxStack)
+            else if(addStack && (stack < 0 ||
+                (int8_t)existing->GetStack() < (int8_t)maxStack))
             {
-                stack = (uint8_t)(stack + existing->GetStack());
-                existing->SetStack(maxStack < stack ? maxStack : stack);
-            }
+                stack = (int8_t)(stack + (int8_t)existing->GetStack());
+                if(stack > (int8_t)maxStack)
+                {
+                    stack = (int8_t)maxStack;
+                }
 
-            if(resetTime)
-            {
-                existing->SetExpiration(0);
+                if(stack < 0)
+                {
+                    stack = 0;
+                }
+
+                existing->SetStack((uint8_t)stack);
             }
 
             if(existing->GetStack() > 0)
@@ -671,14 +910,21 @@ std::set<uint32_t> ActiveEntityState::AddStatusEffects(const AddStatusEffectMap&
 
             add = false;
         }
+        else if(stack <= 0)
+        {
+            // Effect does not exist, ignore removal/reduction attempt
+            continue;
+        }
         else
         {
             // Effect does not exist already, determine if it can be added
             auto common = def->GetCommon();
 
-            // Map out existing effects and info to check for inverse cancellation
+            // Map out existing effects and info to check for inverse
+            // cancellation
             bool canCancel = common->CorrectTblCount() > 0;
-            libcomp::EnumMap<CorrectTbl, std::unordered_map<bool, uint8_t>> cancelMap;
+            libcomp::EnumMap<CorrectTbl,
+                std::unordered_map<bool, uint8_t>> cancelMap;
             for(auto c : common->GetCorrectTbl())
             {
                 if(c->GetValue() == 0 || c->GetType() == 1)
@@ -781,17 +1027,17 @@ std::set<uint32_t> ActiveEntityState::AddStatusEffects(const AddStatusEffectMap&
                 // Should never be more than one but in case there is, the
                 // lowest ID will be cancelled
                 auto exEffect = mStatusEffects[*inverseEffects.begin()];
-                if(exEffect->GetStack() == stack)
+                if(exEffect->GetStack() == (uint8_t)stack)
                 {
                     // Cancel the old one, don't add anything
                     add = false;
 
                     removeEffect = exEffect;
                 }
-                else if(exEffect->GetStack() < stack)
+                else if(exEffect->GetStack() < (uint8_t)stack)
                 {
                     // Cancel the old one, add the new one with a lower stack
-                    stack = (uint8_t)(stack - exEffect->GetStack());
+                    stack = (int8_t)(stack - (int8_t)exEffect->GetStack());
                     add = true;
 
                     removeEffect = exEffect;
@@ -799,104 +1045,185 @@ std::set<uint32_t> ActiveEntityState::AddStatusEffects(const AddStatusEffectMap&
                 else
                 {
                     // Reduce the stack of the existing one;
-                    exEffect->SetStack((uint8_t)(exEffect->GetStack() - stack));
+                    exEffect->SetStack((uint8_t)(
+                        exEffect->GetStack() - (uint8_t)stack));
                     add = false;
 
                     // Application logic 2 effects have their expirations reset
-                    // any time they are re-applied
+                    // any time they are re-applied (barring "set" durations)
                     auto exDef = definitionManager->GetStatusData(
                         exEffect->GetEffect());
                     if(exDef->GetBasic()->GetApplicationLogic() == 2)
                     {
-                        exEffect->SetExpiration(0);
+                        resetTime = true;
                     }
 
                     effect = exEffect;
                 }
             }
         }
-    
+
+        // Only add the effect if its stack is greater than 0
+        add &= stack > 0;
+
         if(add)
         {
             // Effect not set yet, build it now
             effect = libcomp::PersistentObject::New<objects::StatusEffect>(true);
             effect->SetEntity(GetEntityUUID());
             effect->SetEffect(effectType);
-            effect->SetStack(stack);
+            effect->SetStack((uint8_t)stack);
+            effect->SetIsConstant(ePair.second.IsConstant);
         }
 
         // Perform insert or edit modifications
-        if(effect)
+        bool activateEffect = add;
+        if(effect && (effect->GetExpiration() == 0 ||
+            (resetTime && cancel->GetDurationType() !=
+                objects::MiCancelData::DurationType_t::MS_SET &&
+                cancel->GetDurationType() !=
+                objects::MiCancelData::DurationType_t::DAY_SET)))
         {
-            if(effect->GetExpiration() == 0)
+            // Set/reset the expiration
+            uint32_t expiration = 0;
+            bool absoluteTime = false;
+            bool durationOverride = false;
+            bool durationRequired = true;
+            switch(cancel->GetDurationType())
             {
-                //Set the expiration
-                uint32_t expiration = 0;
-                bool absoluteTime = false;
-                switch(cancel->GetDurationType())
+            case objects::MiCancelData::DurationType_t::MS:
+            case objects::MiCancelData::DurationType_t::MS_SET:
+                // Milliseconds stored as relative countdown
+                expiration = ePair.second.Duration
+                    ? ePair.second.Duration : cancel->GetDuration();
+                durationOverride = ePair.second.Duration != 0;
+                break;
+            case objects::MiCancelData::DurationType_t::HOUR:
+                // Convert hours to absolute time in seconds
+                expiration = (uint32_t)(cancel->GetDuration() * 3600);
+                absoluteTime = true;
+                break;
+            case objects::MiCancelData::DurationType_t::DAY:
+            case objects::MiCancelData::DurationType_t::DAY_SET:
+                // Convert days to absolute time in seconds
+                expiration = (uint32_t)(cancel->GetDuration() * 24 * 3600);
+                absoluteTime = true;
+                break;
+            case objects::MiCancelData::DurationType_t::NONE:
+                if(ePair.second.Duration)
                 {
-                case objects::MiCancelData::DurationType_t::MS:
-                case objects::MiCancelData::DurationType_t::MS_SET:
-                    // Milliseconds stored as relative countdown
-                    expiration = cancel->GetDuration();
-                    break;
-                case objects::MiCancelData::DurationType_t::HOUR:
-                    // Convert hours to absolute time in seconds
-                    expiration = (uint32_t)(cancel->GetDuration() * 3600);
-                    absoluteTime = true;
-                    break;
-                case objects::MiCancelData::DurationType_t::DAY:
-                case objects::MiCancelData::DurationType_t::DAY_SET:
-                    // Convert days to absolute time in seconds
-                    expiration = (uint32_t)(cancel->GetDuration() * 24 * 3600);
-                    absoluteTime = true;
-                    break;
-                default:
-                    // None or invalid, nothing to do
-                    break;
+                    // Set explicit expiration (in milliseconds)
+                    expiration = ePair.second.Duration;
+                    effect->SetIsConstant(false);
+                    durationOverride = true;
                 }
-
-                if(basic->GetStackType() == 1)
+                else
                 {
-                    // Stack scales time
-                    expiration = expiration * effect->GetStack();
+                    durationRequired = false;
                 }
+                break;
+            default:
+                // Invalid, nothing to do
+                break;
+            }
 
-                if(absoluteTime)
+            if(basic->GetStackType() == 1 && !durationOverride)
+            {
+                // Stack scales time
+                expiration = expiration * effect->GetStack();
+            }
+
+            if(absoluteTime)
+            {
+                expiration = (uint32_t)(now + expiration);
+            }
+
+            bool setTime = !resetTime || basic->GetApplicationLogic() >= 2;
+            if(!setTime)
+            {
+                // Do not decrease existing time if we get here
+                if(mEffectsActive)
                 {
-                    expiration = (uint32_t)(now + expiration);
-                }
+                    uint32_t time = absoluteTime ? expiration
+                        : (uint32_t)(now + (expiration * 0.001));
 
+                    setTime = true;
+                    for(auto& pair : mNextEffectTimes)
+                    {
+                        if(pair.second.find(effectType) != pair.second.end())
+                        {
+                            setTime = pair.first < time;
+                            break;
+                        }
+                    }
+                }
+                else
+                {
+                    setTime = effect->GetExpiration() < expiration;
+                }
+            }
+
+            if(durationRequired && !expiration)
+            {
+                // Do not actually add it if we have no time here
+                effect = nullptr;
+                activateEffect = false;
+            }
+            else if(setTime)
+            {
                 effect->SetExpiration(expiration);
+                activateEffect = true;
             }
         }
-    
+
         if(removeEffect)
         {
-            removes.insert(removeEffect->GetEffect());
-            mStatusEffects.erase(removeEffect->GetEffect());
-            mTimeDamageEffects.erase(removeEffect->GetEffect());
-            if(mEffectsActive && queueChanges)
+            uint32_t rEffectType = removeEffect->GetEffect();
+            removes.insert(rEffectType);
+
+            std::set<uint32_t> removeEffects = { rEffectType };
+            RemoveStatusEffects(removeEffects);
+
+            if(mEffectsActive)
             {
-                // Non-system time 3 indicates removes
-                mNextEffectTimes[3].insert(removeEffect->GetEffect());
+                // Remove any times associated to the status being removed
+                for(auto& pair : mNextEffectTimes)
+                {
+                    // Skip system times
+                    if(pair.first > 3)
+                    {
+                        pair.second.erase(rEffectType);
+                    }
+                }
+
+                // Then optionally queue its removal
+                if(queueChanges)
+                {
+                    // Non-system time 3 indicates removes
+                    mNextEffectTimes[3].insert(rEffectType);
+                }
             }
         }
 
         if(effect)
         {
-            mStatusEffects[effect->GetEffect()] = effect;
+            RegisterStatusEffect(effect, definitionManager);
+
             if(mEffectsActive)
             {
-                if(add)
+                uint32_t modEffectType = effect->GetEffect();
+                if(activateEffect)
                 {
-                    ActivateStatusEffect(effect, definitionManager, now);
+                    ActivateStatusEffect(effect, definitionManager, now, !add);
                 }
 
-                if(queueChanges)
+                // If changes are being queued or an effect other than the one
+                // we expected to add was affected (ex: inverse cancels), queue
+                // the change up
+                if(queueChanges || effectType != modEffectType)
                 {
                     // Add non-system time for add or update
-                    mNextEffectTimes[add ? 1 : 2].insert(effect->GetEffect());
+                    mNextEffectTimes[add ? 1 : 2].insert(modEffectType);
                 }
             }
         }
@@ -910,66 +1237,101 @@ std::set<uint32_t> ActiveEntityState::AddStatusEffects(const AddStatusEffectMap&
     return removes;
 }
 
-void ActiveEntityState::ExpireStatusEffects(const std::set<uint32_t>& effectTypes)
+std::set<uint32_t> ActiveEntityState::ExpireStatusEffects(
+    const std::set<uint32_t>& effectTypes)
 {
-    bool expired = false;
     std::lock_guard<std::mutex> lock(mLock);
+
+    std::set<uint32_t> removeEffects;
     for(uint32_t effectType : effectTypes)
     {
         auto it = mStatusEffects.find(effectType);
         if(it != mStatusEffects.end())
         {
-            mStatusEffects.erase(effectType);
-            mNRAShields.erase(effectType);
-            mTimeDamageEffects.erase(effectType);
-            for(auto cPair : mCancelConditions)
-            {
-                cPair.second.erase(effectType);
-            }
+            removeEffects.insert(effectType);
+        }
+    }
 
-            if(mEffectsActive)
+    // Effects identified, remove and update effect times (if active)
+    if(removeEffects.size() > 0)
+    {
+        RemoveStatusEffects(removeEffects);
+
+        if(mEffectsActive)
+        {
+            for(uint32_t effectType : removeEffects)
             {
                 // Non-system time 3 indicates removes
                 SetNextEffectTime(effectType, 0);
                 mNextEffectTimes[3].insert(effectType);
-                expired = true;
             }
+
+            RegisterNextEffectTime();
         }
     }
 
-    if(expired)
+    if(mEffectsActive)
     {
-        RegisterNextEffectTime();
+        removeEffects.clear();
     }
+
+    return removeEffects;
 }
 
-void ActiveEntityState::CancelStatusEffects(uint8_t cancelFlags)
+std::set<uint32_t> ActiveEntityState::CancelStatusEffects(
+    uint8_t cancelFlags, const std::set<uint32_t>& keepEffects)
 {
-    std::set<uint32_t> cancelled;
+    bool cancelled = false;
+    return CancelStatusEffects(cancelFlags, cancelled, keepEffects);
+}
+
+std::set<uint32_t> ActiveEntityState::CancelStatusEffects(
+    uint8_t cancelFlags, bool& cancelled,
+    const std::set<uint32_t>& keepEffects)
+{
+    cancelled = false;
+
+    std::set<uint32_t> cancelEffects;
     if(mCancelConditions.size() > 0)
     {
         std::lock_guard<std::mutex> lock(mLock);
+
         for(auto cPair : mCancelConditions)
         {
             if(cancelFlags & cPair.first)
             {
                 for(uint32_t effectType : cPair.second)
                 {
-                    cancelled.insert(effectType);
+                    if(keepEffects.find(effectType) ==
+                        keepEffects.end())
+                    {
+                        cancelEffects.insert(effectType);
+                    }
                 }
             }
         }
     }
 
-    if(cancelled.size() > 0)
+    if(cancelEffects.size() > 0)
     {
-        ExpireStatusEffects(cancelled);
+        cancelled = true;
+        return ExpireStatusEffects(cancelEffects);
+    }
+    else
+    {
+        return std::set<uint32_t>();
     }
 }
 
 void ActiveEntityState::SetStatusEffectsActive(bool activate,
     libcomp::DefinitionManager* definitionManager, uint32_t now)
 {
+    if(activate && !EntityIsSet())
+    {
+        // Do not activate effects if no entity is set yet
+        return;
+    }
+
     if(now == 0)
     {
         now = (uint32_t)std::time(0);
@@ -986,12 +1348,21 @@ void ActiveEntityState::SetStatusEffectsActive(bool activate,
     if(activate)
     {
         // Set regen
-        SetNextEffectTime(0, now + 10);
+        mNextRegenSync = now + 10;
+        SetNextEffectTime(0, mNextRegenSync);
+
+        auto activated = GetActivatedAbility();
+        if(activated && activated->GetUpkeepCost() > 0)
+        {
+            // Set upkeep
+            mNextUpkeep = now + 3;
+            SetNextEffectTime(0, mNextUpkeep);
+        }
 
         // Set status effect expirations
         for(auto pair : mStatusEffects)
         {
-            ActivateStatusEffect(pair.second, definitionManager, now);
+            ActivateStatusEffect(pair.second, definitionManager, now, false);
         }
 
         RegisterNextEffectTime();
@@ -999,7 +1370,6 @@ void ActiveEntityState::SetStatusEffectsActive(bool activate,
     else
     {
         mTimeDamageEffects.clear();
-        mCancelConditions.clear();
         
         if(mCurrentZone)
         {
@@ -1016,37 +1386,55 @@ void ActiveEntityState::SetStatusEffectsActive(bool activate,
                 auto it = mStatusEffects.find(effectType);
                 if(it == mStatusEffects.end()) continue;
 
-                uint32_t exp = GetCurrentExpiration(it->second, definitionManager,
-                    pair.first, now);
-                it->second->SetExpiration(exp);
+                auto effect = it->second;
+                uint32_t exp = GetCurrentExpiration(effect, pair.first,
+                    now);
+
+                // Make sure the expiration is never frozen at 0 without
+                // a normal in zone expiration or the client can desync
+                if(effect->GetExpiration() && !exp)
+                {
+                    exp = 1;
+                }
+
+                effect->SetExpiration(exp);
             }
         }
     }
 }
 
-bool ActiveEntityState::PopEffectTicks(libcomp::DefinitionManager* definitionManager,
-    uint32_t time, int32_t& hpTDamage, int32_t& mpTDamage, std::set<uint32_t>& added,
+uint8_t ActiveEntityState::PopEffectTicks(uint32_t time, int32_t& hpTDamage,
+    int32_t& mpTDamage, int32_t& tUpkeep, std::set<uint32_t>& added,
     std::set<uint32_t>& updated, std::set<uint32_t>& removed)
 {
     hpTDamage = 0;
     mpTDamage = 0;
+    tUpkeep = 0;
     added.clear();
     updated.clear();
     removed.clear();
 
     std::lock_guard<std::mutex> lock(mLock);
+
+    // If effects are not active, stop now
+    if(!mEffectsActive)
+    {
+        return 0;
+    }
+
     bool found = false;
     bool reregister = false;
+    bool tDamageSpecial = false;
     do
     {
         std::set<uint32_t> passed;
-        std::unordered_map<uint32_t, uint32_t> next;
-        for(auto pair : mNextEffectTimes)
+        std::list<std::pair<uint32_t, uint32_t>> next;
+        for(auto& pair : mNextEffectTimes)
         {
             if(pair.first > time) break;
 
             passed.insert(pair.first);
-            
+
             // Check hardcoded added, updated, removed first
             if(pair.first == 1)
             {
@@ -1064,20 +1452,71 @@ bool ActiveEntityState::PopEffectTicks(libcomp::DefinitionManager* definitionMan
                 continue;
             }
 
-            if(pair.second.find(0) != pair.second.end())
+            bool systemEffect = pair.second.find(0) != pair.second.end();
+            bool doRegen = systemEffect && !mNextUpkeep;
+
+            if(systemEffect && mNextUpkeep && time >= mNextUpkeep)
+            {
+                // Pay upkeep
+                auto activated = GetActivatedAbility();
+                if(activated && activated->GetUpkeepCost() > 0 &&
+                    mAlive)
+                {
+                    tUpkeep = (int32_t)(activated->GetUpkeepCost());
+
+                    // Upkeep cost occurs every 3 seconds
+                    mNextUpkeep = pair.first + 3;
+                    next.push_back(std::pair<uint32_t, uint32_t>(0,
+                        mNextUpkeep));
+                }
+                else
+                {
+                    mNextUpkeep = 0;
+                }
+            }
+
+            if(systemEffect && mNextRegenSync && time >= mNextRegenSync)
             {
                 // Adjust T-Damage if the entity is not dead
                 if(mAlive)
                 {
-                    hpTDamage = (int32_t)(hpTDamage -
-                        GetCorrectValue(CorrectTbl::HP_REGEN));
-                    mpTDamage = (int32_t)(mpTDamage -
-                        GetCorrectValue(CorrectTbl::MP_REGEN));
+                    tDamageSpecial = HasSpecialTDamage();
+
+                    if(doRegen)
+                    {
+                        bool skipHPRegen = false;
+                        auto calcState = GetCalculatedState();
+                        if(calcState->ExistingTokuseiAspectsContains(
+                            (int8_t)TokuseiAspectType::ZONE_INSTANCE_POISON))
+                        {
+                            // Ignore all HP regen and take HP damage based
+                            // upon max HP and the instance's poison level
+                            auto zone = GetZone();
+                            auto instance = zone
+                                ? zone->GetInstance() : nullptr;
+                            if(instance && instance->GetPoisonLevel())
+                            {
+                                skipHPRegen = true;
+                                hpTDamage = (int32_t)(hpTDamage +
+                                    ceil((float)instance->GetPoisonLevel() *
+                                        0.01f * (float)GetMaxHP()));
+                            }
+                        }
+
+                        if(!skipHPRegen)
+                        {
+                            hpTDamage = (int32_t)(hpTDamage -
+                                GetCorrectValue(CorrectTbl::HP_REGEN));
+                        }
+
+                        mpTDamage = (int32_t)(mpTDamage -
+                            GetCorrectValue(CorrectTbl::MP_REGEN));
+                    }
 
                     // Apply T-damage
                     for(auto effectType : mTimeDamageEffects)
                     {
-                        auto se = definitionManager->GetStatusData(effectType);
+                        auto se = mStatusEffectDefs[effectType];
                         auto damage = se->GetEffect()->GetDamage();
 
                         hpTDamage = (int32_t)(hpTDamage + damage->GetHPDamage());
@@ -1085,24 +1524,19 @@ bool ActiveEntityState::PopEffectTicks(libcomp::DefinitionManager* definitionMan
                     }
                 }
 
-                // T-Damage applies is every 10 seconds
-                next[0] = pair.first + 10;
+                // T-Damage application is every 10 seconds
+                mNextRegenSync = pair.first + 10;
+                next.push_back(std::pair<uint32_t, uint32_t>(0,
+                    mNextRegenSync));
 
                 pair.second.erase(0);
             }
 
+            // Remove effects that have ended
+            RemoveStatusEffects(pair.second);
             for(auto effectType : pair.second)
             {
-                // Effect has ended
-                auto effect = mStatusEffects[effectType];
-                mStatusEffects.erase(effectType);
-                mTimeDamageEffects.erase(effectType);
                 removed.insert(effectType);
-
-                for(auto cPair : mCancelConditions)
-                {
-                    cPair.second.erase(effectType);
-                }
             }
         }
 
@@ -1126,20 +1560,46 @@ bool ActiveEntityState::PopEffectTicks(libcomp::DefinitionManager* definitionMan
     }
 
     // If anything was popped off the map, update the entity
+    uint8_t result = tDamageSpecial ? 2 : 0;
     if(hpTDamage || mpTDamage || added.size() > 0 ||
         updated.size() > 0 || removed.size() > 0)
     {
+        result |= 1;
+    }
+
+    return result;
+}
+
+bool ActiveEntityState::HasSpecialTDamage()
+{
+    return false;
+}
+
+bool ActiveEntityState::ResetUpkeep()
+{
+    std::lock_guard<std::mutex> lock(mLock);
+
+    auto activated = GetActivatedAbility();
+    if(activated && activated->GetUpkeepCost() > 0)
+    {
+        uint32_t now = (uint32_t)std::time(0);
+
+        mNextUpkeep = (uint32_t)(now + 3);
+        SetNextEffectTime(0, mNextUpkeep);
+
+        RegisterNextEffectTime();
+
         return true;
     }
-    else
-    {
-        return false;
-    }
+
+    // Clear time and let it expire on the next tick
+    mNextUpkeep = 0;
+
+    return false;
 }
 
 std::list<std::pair<std::shared_ptr<objects::StatusEffect>, uint32_t>>
-    ActiveEntityState::GetCurrentStatusEffectStates(
-    libcomp::DefinitionManager* definitionManager, uint32_t now)
+    ActiveEntityState::GetCurrentStatusEffectStates(uint32_t now)
 {
     if(now == 0)
     {
@@ -1182,8 +1642,7 @@ std::list<std::pair<std::shared_ptr<objects::StatusEffect>, uint32_t>>
         auto it = nextTimes.find(pair.first);
         if(it != nextTimes.end())
         {
-            exp = GetCurrentExpiration(pair.second, definitionManager,
-                it->second, now);
+            exp = GetCurrentExpiration(pair.second, it->second, now);
         }
 
         std::pair<std::shared_ptr<objects::StatusEffect>, uint32_t> p(pair.second,
@@ -1221,103 +1680,210 @@ size_t ActiveEntityState::AddRemoveOpponent(bool add, int32_t opponentID)
     return mOpponentIDs.size();
 }
 
-int16_t ActiveEntityState::GetNRAChance(uint8_t nraIdx, CorrectTbl type)
+int16_t ActiveEntityState::GetNRAChance(uint8_t nraIdx, CorrectTbl type,
+    std::shared_ptr<objects::CalculatedEntityState> calcState)
 {
-    libcomp::EnumMap<CorrectTbl, int16_t>* map;
+    if(calcState == nullptr)
+    {
+        calcState = GetCalculatedState();
+    }
+
     switch(nraIdx)
     {
     case NRA_NULL:
-        map = &mNullMap;
-        break;
+        return calcState->GetNullChances((int16_t)type);
     case NRA_REFLECT:
-        map = &mReflectMap;
-        break;
+        return calcState->GetReflectChances((int16_t)type);
     case NRA_ABSORB:
-        map = &mAbsorbMap;
-        break;
+        return calcState->GetAbsorbChances((int16_t)type);
     default:
         return 0;
     }
-
-    std::lock_guard<std::mutex> lock(mLock);
-    auto it = map->find(type);
-    return it != map->end() ? it->second : 0;
 }
 
-std::set<uint8_t> ActiveEntityState::PopNRAShields(const std::list<
-    CorrectTbl>& types)
+bool ActiveEntityState::GetNRAShield(uint8_t nraIdx, CorrectTbl type,
+    bool reduce)
 {
-    std::set<uint8_t> result;
-    std::set<uint32_t> adjustEffects;
-    std::set<uint32_t> expireEffects;
+    uint32_t adjustEffect = 0;
+    bool expire = false;
     {
         std::lock_guard<std::mutex> lock(mLock);
         for(auto pair : mNRAShields)
         {
-            for(auto type : types)
+            auto it = pair.second.find(type);
+            if(it != pair.second.end() &&
+                it->second.find(nraIdx) != it->second.end())
             {
-                if(pair.second.find(type) != pair.second.end())
-                {
-                    for(auto idx : pair.second[type])
-                    {
-                        result.insert(idx);
-                    }
-                    adjustEffects.insert(pair.first);
-                }
+                adjustEffect = pair.first;
+                break;
             }
         }
 
-        for(uint32_t effectID : adjustEffects)
+        if(!reduce)
         {
-            auto effect = mStatusEffects[effectID];
+            return adjustEffect != 0;
+        }
 
-            uint8_t newStack = (uint8_t)(effect->GetStack() - 1);
-            effect->SetStack(newStack);
-            if(newStack == 0)
+        if(adjustEffect)
+        {
+            auto it = mStatusEffects.find(adjustEffect);
+            if(it != mStatusEffects.end())
             {
-                expireEffects.insert(effectID);
+                auto effect = it->second;
+
+                uint8_t newStack = (uint8_t)(effect->GetStack() - 1);
+                effect->SetStack(newStack);
+                expire = newStack == 0;
             }
         }
     }
 
-    if(expireEffects.size() > 0)
+    if(expire)
     {
-        ExpireStatusEffects(expireEffects);
+        ExpireStatusEffects({ adjustEffect });
     }
 
-    return result;
+    return adjustEffect != 0;
 }
 
-uint8_t ActiveEntityState::GetNextActivatedAbilityID()
+int8_t ActiveEntityState::GetNextActivatedAbilityID()
 {
     std::lock_guard<std::mutex> lock(mLock);
-    uint8_t next = mNextActivatedAbilityID;
 
-    mNextActivatedAbilityID = (uint8_t)((mNextActivatedAbilityID + 1) % 128);
-    if(mNextActivatedAbilityID == 0)
+    bool firstLoop = true;
+    int8_t first = mNextActivatedAbilityID;
+    int8_t next = mNextActivatedAbilityID;
+
+    do
     {
-        mNextActivatedAbilityID = 1;
-    }
+        if(!firstLoop && next == first)
+        {
+            // All are being used, this should never happen but return
+            // a default if for some reason it does
+            return 0;
+        }
+        else
+        {
+            next = mNextActivatedAbilityID;
+            mNextActivatedAbilityID = (int8_t)(
+                (mNextActivatedAbilityID + 1) % 128);
+        }
+
+        firstLoop = false;
+    } while(SpecialActivationsKeyExists(next));
 
     return next;
 }
 
-void ActiveEntityState::SetStatusEffects(
-    const std::list<libcomp::ObjectReference<objects::StatusEffect>>& effects)
+void ActiveEntityState::RemoveStatusEffects(const std::set<uint32_t>& effectTypes)
 {
-    std::list<std::shared_ptr<objects::StatusEffect>> l;
-    for(auto e : effects)
+    std::set<uint8_t> cancelTypes;
+
+    bool recalcIgnore = false;
+    bool recalcAI = false;
+    for(uint32_t effectType : effectTypes)
     {
-        l.push_back(e.Get());
+        auto def = mStatusEffectDefs[effectType];
+        recalcAI |= def && (def->GetEffect()
+            ->GetRestrictions() & 0x1D) != 0;
+
+        mStatusEffects.erase(effectType);
+        mStatusEffectDefs.erase(effectType);
+        mNRAShields.erase(effectType);
+        mTimeDamageEffects.erase(effectType);
+
+        for(auto& cPair : mCancelConditions)
+        {
+            cPair.second.erase(effectType);
+            cancelTypes.insert(cPair.first);
+        }
+
+        RemoveStatusRestrictAct(effectType);
+        RemoveStatusRestrictMove(effectType);
+        RemoveStatusRestrictMagic(effectType);
+        RemoveStatusRestrictSpecial(effectType);
+        RemoveStatusRestrictTalk(effectType);
+
+        if(IsIgnoreEffect(effectType))
+        {
+            recalcIgnore = true;
+
+            if(effectType == SVR_CONST.STATUS_BIKE)
+            {
+                // Clear any existing boost flags in case it was removed
+                // while still boosting
+                RemoveAdditionalTokusei(SVR_CONST.TOKUSEI_BIKE_BOOST);
+                if(GetDisplayState() == ActiveDisplayState_t::BIKE_BOOST)
+                {
+                    SetDisplayState(ActiveDisplayState_t::ACTIVE);
+                }
+
+                auto state = ClientState::GetEntityClientState(GetEntityID());
+                if(state)
+                {
+                    state->SetBikeBoosting(false);
+                }
+            }
+            else if((effectType == SVR_CONST.STATUS_MOUNT ||
+                effectType == SVR_CONST.STATUS_MOUNT_SUPER) &&
+                GetDisplayState() == ActiveDisplayState_t::MOUNT)
+            {
+                SetDisplayState(ActiveDisplayState_t::ACTIVE);
+            }
+        }
     }
-    SetStatusEffects(l);
+
+    // Clean up any now empty cancel conditions
+    for(uint8_t cancelType : cancelTypes)
+    {
+        if(mCancelConditions[cancelType].size() == 0)
+        {
+            mCancelConditions.erase(cancelType);
+        }
+    }
+
+    if(recalcAI && mAIState)
+    {
+        mAIState->ResetSkillsMapped();
+    }
+
+    if(GetIsHidden() &&
+        mStatusEffects.find(SVR_CONST.STATUS_DEMON_ONLY) == mStatusEffects.end())
+    {
+        SetIsHidden(false);
+    }
+
+    if(mCloaked &&
+        mStatusEffects.find(SVR_CONST.STATUS_CLOAK) == mStatusEffects.end())
+    {
+        mCloaked = false;
+        recalcIgnore = true;
+    }
+
+    if(recalcIgnore)
+    {
+        ResetAIIgnored();
+    }
 }
 
 void ActiveEntityState::ActivateStatusEffect(
     const std::shared_ptr<objects::StatusEffect>& effect,
-    libcomp::DefinitionManager* definitionManager, uint32_t now)
+    libcomp::DefinitionManager* definitionManager, uint32_t now, bool timeOnly)
 {
     auto effectType = effect->GetEffect();
+
+    if(timeOnly)
+    {
+        // Remove the current expiration
+        for(auto& pair : mNextEffectTimes)
+        {
+            // Skip system times
+            if(pair.first > 3)
+            {
+                pair.second.erase(effectType);
+            }
+        }
+    }
 
     auto se = definitionManager->GetStatusData(effectType);
     auto cancel = se->GetCancel();
@@ -1325,36 +1891,84 @@ void ActiveEntityState::ActivateStatusEffect(
     {
         case objects::MiCancelData::DurationType_t::MS:
         case objects::MiCancelData::DurationType_t::MS_SET:
+            if(!effect->GetIsConstant())
             {
                 // Force next tick time to duration
                 uint32_t time = (uint32_t)(now + (effect->GetExpiration() * 0.001));
                 mNextEffectTimes[time].insert(effectType);
             }
             break;
+        case objects::MiCancelData::DurationType_t::NONE:
+            if(!effect->GetIsConstant() && effect->GetExpiration())
+            {
+                // Force next tick time to duration but only if it has time
+                uint32_t time = (uint32_t)(now + (effect->GetExpiration() * 0.001));
+                mNextEffectTimes[time].insert(effectType);
+            }
+            break;
         default:
-            mNextEffectTimes[effect->GetExpiration()].insert(effectType);
+            if(!effect->GetIsConstant())
+            {
+                mNextEffectTimes[effect->GetExpiration()].insert(effectType);
+            }
             break;
     }
 
-    // Mark the cancel conditions
-    for(uint16_t x = 0x0001; x < 0x00100;)
-    {
-        uint8_t x8 = (uint8_t)x;
-        if(cancel->GetCancelTypes() & x8)
-        {
-            mCancelConditions[x8].insert(effectType);
-        }
+    // Store the definition for quick access later
+    mStatusEffectDefs[effectType] = se;
 
-        x = (uint16_t)(x << 1);
+    if(timeOnly)
+    {
+        // Nothing more to do
+        return;
+    }
+
+    // Populate restrictions
+    uint8_t restr = (uint8_t)se->GetEffect()->GetRestrictions();
+    if(restr & 0x01)
+    {
+        // No (non-system) actions
+        InsertStatusRestrictAct(effectType);
+    }
+
+    if(restr & 0x02)
+    {
+        // No movement
+        InsertStatusRestrictMove(effectType);
+    }
+
+    if(restr & 0x04)
+    {
+        // No magic skills
+        InsertStatusRestrictMagic(effectType);
+    }
+
+    if(restr & 0x08)
+    {
+        // No special skills
+        InsertStatusRestrictSpecial(effectType);
+    }
+
+    if(restr & 0x10)
+    {
+        // No taks skills (source or target)
+        InsertStatusRestrictTalk(effectType);
+    }
+
+    if((restr & 0x1D) != 0 && mAIState)
+    {
+        // One or more skill affecting effects added
+        mAIState->ResetSkillsMapped();
     }
 
     // Add to timed damage effect set if T-Damage is specified
+    auto common = se->GetCommon();
     auto basic = se->GetBasic();
     auto damage = se->GetEffect()->GetDamage();
     if(damage->GetHPDamage() || damage->GetMPDamage())
     {
         // Ignore if the damage applies as part of the skill only
-        if(!(basic->GetStackType() == 1 && basic->GetApplicationLogic() == 0))
+        if(common->GetCategory()->GetMainCategory() != 2)
         {
             mTimeDamageEffects.insert(effectType);
         }
@@ -1364,7 +1978,6 @@ void ActiveEntityState::ActivateStatusEffect(
     // check for NRA shields
     if(basic->GetStackType() == 0 && basic->GetApplicationLogic() == 3)
     {
-        auto common = se->GetCommon();
         for(auto ct : common->GetCorrectTbl())
         {
             if((uint8_t)ct->GetID() >= (uint8_t)CorrectTbl::NRA_WEAPON &&
@@ -1375,33 +1988,104 @@ void ActiveEntityState::ActivateStatusEffect(
             }
         }
     }
+
+    if(!GetIsHidden() && effect->GetEffect() == SVR_CONST.STATUS_DEMON_ONLY)
+    {
+        SetIsHidden(true);
+    }
+
+    if(!mCloaked && effect->GetEffect() == SVR_CONST.STATUS_CLOAK)
+    {
+        mCloaked = true;
+    }
+
+    if(IsIgnoreEffect(effect->GetEffect()))
+    {
+        ResetAIIgnored();
+    }
+}
+
+bool ActiveEntityState::IsIgnoreEffect(uint32_t effectType) const
+{
+    const static std::set<uint32_t> IGNORE_EFFECTS = {
+        SVR_CONST.STATUS_BIKE,
+        SVR_CONST.STATUS_CLOAK,
+        SVR_CONST.STATUS_MOUNT,
+        SVR_CONST.STATUS_MOUNT_SUPER
+    };
+
+    return IGNORE_EFFECTS.find(effectType) != IGNORE_EFFECTS.end();
+}
+
+void ActiveEntityState::ResetAIIgnored()
+{
+    bool ignore = false;
+    for(auto& pair : mStatusEffects)
+    {
+        if(IsIgnoreEffect(pair.first))
+        {
+            ignore = true;
+            break;
+        }
+    }
+
+    if(ignore != GetAIIgnored())
+    {
+        SetAIIgnored(ignore);
+    }
 }
 
 void ActiveEntityState::SetNextEffectTime(uint32_t effectType, uint32_t time)
 {
-    for(auto pair : mNextEffectTimes)
+    // Only erase if a non-system effect
+    if(effectType)
     {
-        // Skip non-system times
-        if(pair.first <= 3) continue;
-
-        if(pair.second.find(effectType) != pair.second.end())
+        for(auto pair : mNextEffectTimes)
         {
-            if(time == 0)
-            {
-                pair.second.erase(effectType);
-                if(pair.second.size() == 0)
-                {
-                    mNextEffectTimes.erase(pair.first);
-                }
-            }
+            // Skip non-system times
+            if(pair.first <= 3) continue;
 
-            return;
+            if(pair.second.find(effectType) != pair.second.end())
+            {
+                if(time == 0)
+                {
+                    pair.second.erase(effectType);
+                    if(pair.second.size() == 0)
+                    {
+                        mNextEffectTimes.erase(pair.first);
+                    }
+                }
+
+                return;
+            }
         }
     }
 
     if(time != 0)
     {
         mNextEffectTimes[time].insert(effectType);
+    }
+}
+
+void ActiveEntityState::RegisterStatusEffect(
+    const std::shared_ptr<objects::StatusEffect>& effect,
+    libcomp::DefinitionManager* definitionManager)
+{
+    uint32_t effectType = effect->GetEffect();
+    mStatusEffects[effectType] = effect;
+
+    // Mark the cancel conditions
+    auto se = definitionManager->GetStatusData(effectType);
+    auto cancel = se->GetCancel();
+    for(uint16_t x = 0x0001; x < 0x0100;)
+    {
+        uint8_t x8 = (uint8_t)x;
+        if(cancel->GetCancelTypes() & x8)
+        {
+            mCancelConditions[x8].insert(effectType);
+        }
+
+        x = (uint16_t)(x << 1);
     }
 }
 
@@ -1415,26 +2099,27 @@ void ActiveEntityState::RegisterNextEffectTime()
 }
 
 uint32_t ActiveEntityState::GetCurrentExpiration(
-    const std::shared_ptr<objects::StatusEffect>& effect,
-    libcomp::DefinitionManager* definitionManager, uint32_t nextTime,
+    const std::shared_ptr<objects::StatusEffect>& effect, uint32_t nextTime,
     uint32_t now)
 {
     uint32_t exp = effect->GetExpiration();
 
     if(exp > 0)
     {
-        auto se = definitionManager->GetStatusData(effect->GetEffect());
+        auto se = mStatusEffectDefs[effect->GetEffect()];
         auto cancel = se->GetCancel();
         switch(cancel->GetDurationType())
         {
         case objects::MiCancelData::DurationType_t::MS:
         case objects::MiCancelData::DurationType_t::MS_SET:
+        case objects::MiCancelData::DurationType_t::NONE:
+            if(!effect->GetIsConstant())
             {
                 // Convert back to milliseconds
-                exp = (uint32_t)((nextTime - now) * 1000);
-                if(effect->GetExpiration() < exp)
+                uint32_t newExp = (uint32_t)((nextTime - now) * 1000);
+                if(exp > newExp)
                 {
-                    exp = 0;
+                    exp = newExp;
                 }
             }
             break;
@@ -1447,11 +2132,80 @@ uint32_t ActiveEntityState::GetCurrentExpiration(
     return exp;
 }
 
+bool ActiveEntityState::SkillAvailable(uint32_t skillID)
+{
+    return CurrentSkillsContains(skillID) && !DisabledSkillsContains(skillID);
+}
+
+bool ActiveEntityState::IsLNCType(uint8_t lncType, bool invertFlag)
+{
+    uint8_t lnc = GetLNCType();
+
+    if(invertFlag)
+    {
+        // Inverted flag mode
+        // L/N/C are 4/2/1 respectively with flags allowed
+        switch(lnc)
+        {
+        case LNC_LAW:
+            return (lncType & 0x04) != 0;
+        case LNC_NEUTRAL:
+            return (lncType & 0x02) != 0;
+        case LNC_CHAOS:
+            return (lncType & 0x01) != 0;
+        default:
+            return false;
+        }
+    }
+    else
+    {
+        // Non-flag linear mode
+        // L/N/C are 0/2/4 respectively
+        // 1 is L or N
+        // 3 is N or C
+        // 5 is not N
+        if(lncType == 1)
+        {
+            return lnc == LNC_LAW || lnc == LNC_NEUTRAL;
+        }
+        else if(lncType == 3)
+        {
+            return lnc == LNC_NEUTRAL || lnc == LNC_CHAOS;
+        }
+        else if(lncType == 5)
+        {
+            return lnc == LNC_LAW || lnc == LNC_CHAOS;
+        }
+
+        return lnc == lncType;
+    }
+}
+
 // "Abstract implementations" required for Sqrat usage
-uint8_t ActiveEntityState::RecalculateStats(libcomp::DefinitionManager* definitionManager)
+uint8_t ActiveEntityState::RecalculateStats(libcomp::DefinitionManager* definitionManager,
+    std::shared_ptr<objects::CalculatedEntityState> calcState)
 {
     (void)definitionManager;
+    (void)calcState;
     return 0;
+}
+
+std::set<uint32_t> ActiveEntityState::GetAllSkills(
+    libcomp::DefinitionManager* definitionManager, bool includeTokusei)
+{
+    (void)definitionManager;
+    (void)includeTokusei;
+    return std::set<uint32_t>();
+}
+
+uint8_t ActiveEntityState::GetLNCType()
+{
+    return 0;
+}
+
+int8_t ActiveEntityState::GetGender()
+{
+    return 2;   // None
 }
 
 std::shared_ptr<objects::EntityStats> ActiveEntityState::GetCoreStats()
@@ -1459,9 +2213,32 @@ std::shared_ptr<objects::EntityStats> ActiveEntityState::GetCoreStats()
     return nullptr;
 }
 
-bool ActiveEntityState::Ready()
+int8_t ActiveEntityState::GetLevel()
+{
+    return 0;
+}
+
+bool ActiveEntityState::Ready(bool ignoreDisplayState)
+{
+    (void)ignoreDisplayState;
+
+    return false;
+}
+
+bool ActiveEntityState::EntityIsSet() const
 {
     return false;
+}
+
+bool ActiveEntityState::IsClientVisible()
+{
+    return false;
+}
+
+bool ActiveEntityState::IsMounted()
+{
+    return StatusEffectActive(SVR_CONST.STATUS_MOUNT) ||
+        StatusEffectActive(SVR_CONST.STATUS_MOUNT_SUPER);
 }
 
 namespace channel
@@ -1470,42 +2247,69 @@ namespace channel
 template<>
 ActiveEntityStateImp<objects::Character>::ActiveEntityStateImp()
 {
-    SetEntityType(objects::EntityStateObject::EntityType_t::CHARACTER);
+    SetEntityType(EntityType_t::CHARACTER);
     SetFaction(objects::ActiveEntityStateObject::Faction_t::PLAYER);
 }
 
 template<>
 ActiveEntityStateImp<objects::Demon>::ActiveEntityStateImp()
 {
-    SetEntityType(objects::EntityStateObject::EntityType_t::PARTNER_DEMON);
+    SetEntityType(EntityType_t::PARTNER_DEMON);
     SetFaction(objects::ActiveEntityStateObject::Faction_t::PLAYER);
 }
 
 template<>
 ActiveEntityStateImp<objects::Enemy>::ActiveEntityStateImp()
 {
-    SetEntityType(objects::EntityStateObject::EntityType_t::ENEMY);
+    SetEntityType(EntityType_t::ENEMY);
     SetFaction(objects::ActiveEntityStateObject::Faction_t::ENEMY);
 }
 
 template<>
-void ActiveEntityStateImp<objects::Character>::SetEntity(
-    const std::shared_ptr<objects::Character>& entity)
+ActiveEntityStateImp<objects::Ally>::ActiveEntityStateImp()
 {
+    SetEntityType(EntityType_t::ALLY);
+    SetFaction(objects::ActiveEntityStateObject::Faction_t::PLAYER);
+}
+
+template<>
+void ActiveEntityStateImp<objects::Character>::SetEntity(
+    const std::shared_ptr<objects::Character>& entity,
+    libcomp::DefinitionManager* definitionManager)
+{
+    (void)definitionManager;
+
     {
         std::lock_guard<std::mutex> lock(mLock);
         mEntity = entity;
     }
 
-    std::list<libcomp::ObjectReference<objects::StatusEffect>> effects;
+    std::list<std::shared_ptr<objects::StatusEffect>> effects;
     if(entity)
     {
         // Character should always be set but check just in case
-        effects = entity->GetStatusEffects();
+        for(auto e : entity->GetStatusEffects())
+        {
+            effects.push_back(e.Get());
+        }
+
         mAlive = entity->GetCoreStats()->GetHP() > 0;
+
+        SetDisplayState(ActiveDisplayState_t::DATA_NOT_SENT);
+    }
+    else
+    {
+        SetDisplayState(ActiveDisplayState_t::NOT_SET);
     }
 
-    SetStatusEffects(effects);
+    // Remove any values from the previous entity
+    SetIsHidden(false);
+    SetAIIgnored(false);
+    ClearStatusTimes();
+    SetActivatedAbility(nullptr);
+    ClearSpecialActivations();
+
+    SetStatusEffects(effects, definitionManager);
 
     // Reset knockback and let refresh correct
     SetKnockbackResist(0);
@@ -1514,21 +2318,41 @@ void ActiveEntityStateImp<objects::Character>::SetEntity(
 
 template<>
 void ActiveEntityStateImp<objects::Demon>::SetEntity(
-    const std::shared_ptr<objects::Demon>& entity)
+    const std::shared_ptr<objects::Demon>& entity,
+    libcomp::DefinitionManager* definitionManager)
 {
     {
         std::lock_guard<std::mutex> lock(mLock);
         mEntity = entity;
     }
 
-    std::list<libcomp::ObjectReference<objects::StatusEffect>> effects;
+    std::list<std::shared_ptr<objects::StatusEffect>> effects;
     if(entity)
     {
-        effects = entity->GetStatusEffects();
+        for(auto e : entity->GetStatusEffects())
+        {
+            effects.push_back(e.Get());
+        }
+
         mAlive = entity->GetCoreStats()->GetHP() > 0;
+
+        SetDisplayState(ActiveDisplayState_t::DATA_NOT_SENT);
+    }
+    else
+    {
+        SetDisplayState(ActiveDisplayState_t::NOT_SET);
     }
 
-    SetStatusEffects(effects);
+    SetStatusEffects(effects, definitionManager);
+    SetDevilData(entity
+        ? definitionManager->GetDevilData(entity->GetType()) : nullptr);
+
+    auto calcState = GetCalculatedState();
+    calcState->ClearActiveTokuseiTriggers();
+    calcState->ClearEffectiveTokusei();
+    ClearAdditionalTokusei();
+    ClearSkillCooldowns();
+    ClearPendingCombatants();
 
     // Reset knockback and let refresh correct
     SetKnockbackResist(0);
@@ -1537,17 +2361,33 @@ void ActiveEntityStateImp<objects::Demon>::SetEntity(
 
 template<>
 void ActiveEntityStateImp<objects::Enemy>::SetEntity(
-    const std::shared_ptr<objects::Enemy>& entity)
+    const std::shared_ptr<objects::Enemy>& entity,
+    libcomp::DefinitionManager* definitionManager)
 {
-    {
-        std::lock_guard<std::mutex> lock(mLock);
-        mEntity = entity;
-    }
+    std::lock_guard<std::mutex> lock(mLock);
+    mEntity = entity;
     
     if(entity)
     {
         mAlive = entity->GetCoreStats()->GetHP() > 0;
+
+        SetDisplayState(ActiveDisplayState_t::DATA_NOT_SENT);
+
+        auto spawn = entity->GetSpawnSource();
+        if(spawn && spawn->GetFactionGroup())
+        {
+            SetFactionGroup(spawn->GetFactionGroup());
+        }
     }
+    else
+    {
+        mEffectsActive = false;
+        SetDisplayState(ActiveDisplayState_t::NOT_SET);
+        SetFactionGroup(0);
+    }
+
+    SetDevilData(entity
+        ? definitionManager->GetDevilData(entity->GetType()) : nullptr);
 
     // Reset knockback and let refresh correct
     SetKnockbackResist(0);
@@ -1555,266 +2395,38 @@ void ActiveEntityStateImp<objects::Enemy>::SetEntity(
 }
 
 template<>
-const libobjgen::UUID ActiveEntityStateImp<objects::Character>::GetEntityUUID()
-{
-    return mEntity->GetUUID();
-}
-
-template<>
-const libobjgen::UUID ActiveEntityStateImp<objects::Demon>::GetEntityUUID()
-{
-    return mEntity ? mEntity->GetUUID() : NULLUUID;
-}
-
-template<>
-const libobjgen::UUID ActiveEntityStateImp<objects::Enemy>::GetEntityUUID()
-{
-    return NULLUUID;
-}
-
-template<>
-uint8_t ActiveEntityStateImp<objects::Character>::RecalculateStats(
+void ActiveEntityStateImp<objects::Ally>::SetEntity(
+    const std::shared_ptr<objects::Ally>& entity,
     libcomp::DefinitionManager* definitionManager)
 {
-    uint8_t result = 0;
-
     std::lock_guard<std::mutex> lock(mLock);
+    mEntity = entity;
 
-    auto c = GetEntity();
-    auto cs = c->GetCoreStats().Get();
-
-    // Calculate current skills
-    auto previousSkills = GetCurrentSkills();
-    ClearCurrentSkills();
-
-    // 1) Reset to learned skills
-    SetCurrentSkills(c->GetLearnedSkills());
-
-    // 2) Add clan skills
-    auto clan = c->GetClan().Get();
-    if(clan)
+    if(entity)
     {
-        int8_t clanLevel = clan->GetLevel();
-        for(int8_t i = 0; i < clanLevel; i++)
+        mAlive = entity->GetCoreStats()->GetHP() > 0;
+
+        SetDisplayState(ActiveDisplayState_t::DATA_NOT_SENT);
+
+        auto spawn = entity->GetSpawnSource();
+        if(spawn && spawn->GetFactionGroup())
         {
-            for(uint32_t clanSkillID : SVR_CONST.CLAN_LEVEL_SKILLS[(size_t)i])
-            {
-                InsertCurrentSkills(clanSkillID);
-            }
+            SetFactionGroup(spawn->GetFactionGroup());
         }
     }
-
-    // 3) Add party/partner tokusei skills
-    /// @todo
-
-    // 4) Remove any switch skills no longer available
-    RemoveInactiveSwitchSkills();
-
-    // 5) Check for skill set changes
-    bool skillsChanged = previousSkills.size() != CurrentSkillsCount();
-    if(!skillsChanged)
+    else
     {
-        for(uint32_t skillID : previousSkills)
-        {
-            if(!CurrentSkillsContains(skillID))
-            {
-                skillsChanged = true;
-                break;
-            }
-        }
-    }
-    result = skillsChanged ? ENTITY_CALC_SKILL : 0x00;
-
-    auto stats = CharacterManager::GetCharacterBaseStatMap(cs);
-    if(!mInitialCalc)
-    {
-        SetKnockbackResist((float)stats[CorrectTbl::KNOCKBACK_RESIST]);
-        mInitialCalc = true;
+        mEffectsActive = false;
+        SetDisplayState(ActiveDisplayState_t::NOT_SET);
+        SetFactionGroup(0);
     }
 
-    // Calculate based on adjustments
-    std::list<std::shared_ptr<objects::MiCorrectTbl>> correctTbls;
-    std::list<std::shared_ptr<objects::MiCorrectTbl>> nraTbls;
-    for(auto equip : c->GetEquippedItems())
-    {
-        if(!equip.IsNull())
-        {
-            auto itemData = definitionManager->GetItemData(equip->GetType());
-            for(auto ct : itemData->GetCommon()->GetCorrectTbl())
-            {
-                if((uint8_t)ct->GetID() >= (uint8_t)CorrectTbl::NRA_WEAPON &&
-                    (uint8_t)ct->GetID() <= (uint8_t)CorrectTbl::NRA_MAGIC)
-                {
-                    nraTbls.push_back(ct);
-                }
-                else
-                {
-                    correctTbls.push_back(ct);
-                }
-            }
-        }
-    }
+    SetDevilData(entity
+        ? definitionManager->GetDevilData(entity->GetType()) : nullptr);
 
-    GetAdditionalCorrectTbls(definitionManager, correctTbls);
-
-    UpdateNRAChances(stats, nraTbls);
-    AdjustStats(correctTbls, stats, true);
-    CharacterManager::CalculateDependentStats(stats, cs->GetLevel(), false);
-    AdjustStats(correctTbls, stats, false);
-
-    return result | CompareAndResetStats(stats);
-}
-
-template<>
-uint8_t ActiveEntityStateImp<objects::Demon>::RecalculateStats(
-    libcomp::DefinitionManager* definitionManager)
-{
-    if(!mEntity)
-    {
-        return true;
-    }
-
-    auto previousSkills = GetCurrentSkills();
-    ClearCurrentSkills();
-
-    for(uint32_t skillID : mEntity->GetLearnedSkills())
-    {
-        if(skillID)
-        {
-            InsertCurrentSkills(skillID);
-        }
-    }
-
-    auto demonData = definitionManager->GetDevilData(mEntity->GetType());
-
-    auto growth = demonData->GetGrowth();
-    for(uint32_t traitID : growth->GetTraits())
-    {
-        if(traitID)
-        {
-            InsertCurrentSkills(traitID);
-        }
-    }
-
-    bool skillsChanged = previousSkills.size() != CurrentSkillsCount();
-    if(!skillsChanged)
-    {
-        for(uint32_t skillID : previousSkills)
-        {
-            if(!CurrentSkillsContains(skillID))
-            {
-                skillsChanged = true;
-                break;
-            }
-        }
-    }
-
-    if(skillsChanged && mAIState)
-    {
-        mAIState->ResetSkillsMapped();
-    }
-
-    return RecalculateDemonStats(definitionManager, mEntity->GetType());
-}
-
-template<>
-uint8_t ActiveEntityStateImp<objects::Enemy>::RecalculateStats(
-    libcomp::DefinitionManager* definitionManager)
-{
-    if(!mEntity)
-    {
-        return true;
-    }
-
-    uint32_t demonID = mEntity->GetType();
-    if(!mInitialCalc)
-    {
-        // Calculate initial demon and enemy skills
-        auto demonData = definitionManager->GetDevilData(demonID);
-
-        auto previousSkills = GetCurrentSkills();
-        ClearCurrentSkills();
-
-        auto growth = demonData->GetGrowth();
-        for(auto skillSet : { growth->GetSkills(),
-            growth->GetEnemyOnlySkills() })
-        {
-            for(uint32_t skillID : skillSet)
-            {
-                if(skillID)
-                {
-                    InsertCurrentSkills(skillID);
-                }
-            }
-        }
-
-        for(uint32_t traitID : growth->GetTraits())
-        {
-            if(traitID)
-            {
-                InsertCurrentSkills(traitID);
-            }
-        }
-
-        bool skillsChanged = previousSkills.size() != CurrentSkillsCount();
-        if(!skillsChanged)
-        {
-            for(uint32_t skillID : previousSkills)
-            {
-                if(!CurrentSkillsContains(skillID))
-                {
-                    skillsChanged = true;
-                    break;
-                }
-            }
-        }
-
-        if(skillsChanged && mAIState)
-        {
-            mAIState->ResetSkillsMapped();
-        }
-    }
-
-    return RecalculateDemonStats(definitionManager, demonID);
-}
-
-template<>
-uint8_t ActiveEntityStateImp<objects::Character>::GetLNCType(
-    libcomp::DefinitionManager* definitionManager)
-{
-    (void)definitionManager;
-
-    return CalculateLNCType(mEntity->GetLNC());
-}
-
-template<>
-uint8_t ActiveEntityStateImp<objects::Demon>::GetLNCType(
-    libcomp::DefinitionManager* definitionManager)
-{
-    int16_t lncPoints = 0;
-    if(mEntity)
-    {
-        auto demonData = definitionManager->GetDevilData(
-            mEntity->GetType());
-        lncPoints = demonData->GetBasic()->GetLNC();
-    }
-
-    return CalculateLNCType(lncPoints);
-}
-
-template<>
-uint8_t ActiveEntityStateImp<objects::Enemy>::GetLNCType(
-    libcomp::DefinitionManager* definitionManager)
-{
-    int16_t lncPoints = 0;
-    if(mEntity)
-    {
-        auto demonData = definitionManager->GetDevilData(
-            mEntity->GetType());
-        lncPoints = demonData->GetBasic()->GetLNC();
-    }
-
-    return CalculateLNCType(lncPoints);
+    // Reset knockback and let refresh correct
+    SetKnockbackResist(0);
+    mInitialCalc = false;
 }
 
 }
@@ -1829,11 +2441,89 @@ const std::set<CorrectTbl> BASE_STATS =
         CorrectTbl::LUCK
     };
 
+// The following are all percentage representations that always apply values
+// as a numeric increase or decrease when represented as a normal percentage
+const std::set<CorrectTbl> FORCE_NUMERIC =
+    {
+        CorrectTbl::RES_DEFAULT,
+        CorrectTbl::RES_WEAPON,
+        CorrectTbl::RES_SLASH,
+        CorrectTbl::RES_THRUST,
+        CorrectTbl::RES_STRIKE,
+        CorrectTbl::RES_LNGR,
+        CorrectTbl::RES_PIERCE,
+        CorrectTbl::RES_SPREAD,
+        CorrectTbl::RES_FIRE,
+        CorrectTbl::RES_ICE,
+        CorrectTbl::RES_ELEC,
+        CorrectTbl::RES_ALMIGHTY,
+        CorrectTbl::RES_FORCE,
+        CorrectTbl::RES_EXPEL,
+        CorrectTbl::RES_CURSE,
+        CorrectTbl::RES_HEAL,
+        CorrectTbl::RES_SUPPORT,
+        CorrectTbl::RES_MAGICFORCE,
+        CorrectTbl::RES_NERVE,
+        CorrectTbl::RES_MIND,
+        CorrectTbl::RES_WORD,
+        CorrectTbl::RES_SPECIAL,
+        CorrectTbl::RES_SUICIDE,
+        CorrectTbl::RATE_XP,
+        CorrectTbl::RATE_MAG,
+        CorrectTbl::RATE_MACCA,
+        CorrectTbl::RATE_EXPERTISE,
+        CorrectTbl::RATE_CLSR,
+        CorrectTbl::RATE_LNGR,
+        CorrectTbl::RATE_SPELL,
+        CorrectTbl::RATE_SUPPORT,
+        CorrectTbl::RATE_HEAL,
+        CorrectTbl::RATE_CLSR_TAKEN,
+        CorrectTbl::RATE_LNGR_TAKEN,
+        CorrectTbl::RATE_SPELL_TAKEN,
+        CorrectTbl::RATE_SUPPORT_TAKEN,
+        CorrectTbl::RATE_HEAL_TAKEN,
+        CorrectTbl::BOOST_DEFAULT,
+        CorrectTbl::BOOST_WEAPON,
+        CorrectTbl::BOOST_SLASH,
+        CorrectTbl::BOOST_THRUST,
+        CorrectTbl::BOOST_STRIKE,
+        CorrectTbl::BOOST_LNGR,
+        CorrectTbl::BOOST_PIERCE,
+        CorrectTbl::BOOST_SPREAD,
+        CorrectTbl::BOOST_FIRE,
+        CorrectTbl::BOOST_ICE,
+        CorrectTbl::BOOST_ELEC,
+        CorrectTbl::BOOST_ALMIGHTY,
+        CorrectTbl::BOOST_FORCE,
+        CorrectTbl::BOOST_EXPEL,
+        CorrectTbl::BOOST_CURSE,
+        CorrectTbl::BOOST_HEAL,
+        CorrectTbl::BOOST_SUPPORT,
+        CorrectTbl::BOOST_MAGICFORCE,
+        CorrectTbl::BOOST_NERVE,
+        CorrectTbl::BOOST_MIND,
+        CorrectTbl::BOOST_WORD,
+        CorrectTbl::BOOST_SPECIAL,
+        CorrectTbl::BOOST_SUICIDE,
+        CorrectTbl::LB_CHANCE,
+        CorrectTbl::RATE_PC,
+        CorrectTbl::RATE_DEMON,
+        CorrectTbl::RATE_PC_TAKEN,
+        CorrectTbl::RATE_DEMON_TAKEN
+    };
+
 void ActiveEntityState::AdjustStats(
     const std::list<std::shared_ptr<objects::MiCorrectTbl>>& adjustments,
-    libcomp::EnumMap<CorrectTbl, int16_t>& stats, bool baseMode)
+    libcomp::EnumMap<CorrectTbl, int32_t>& stats,
+    std::shared_ptr<objects::CalculatedEntityState> calcState, bool baseMode)
 {
     std::set<CorrectTbl> removed;
+    libcomp::EnumMap<CorrectTbl, int32_t> maxPercents;
+
+    // Keep track of each increase to sum up and boost at the end. Percentages
+    // are applied in 2 layers though most are typically in the first group.
+    libcomp::EnumMap<CorrectTbl, int32_t> numericSums;
+    std::array<libcomp::EnumMap<CorrectTbl, int32_t>, 2> percentSums;
     for(auto ct : adjustments)
     {
         auto tblID = ct->GetID();
@@ -1843,27 +2533,53 @@ void ActiveEntityState::AdjustStats(
 
         // If a value is reduced to 0%, leave it
         if(removed.find(tblID) != removed.end()) continue;
-        
+
+        bool calcAdjust = false;
+        uint8_t effectiveType = ct->GetType();
+        int32_t effectiveValue = (int32_t)ct->GetValue();
+        if(effectiveType >= 100)
+        {
+            // This is actually a TokuseiCorrectTbl, check for attributes
+            // like multipliers etc and adjust the value accordingly
+            effectiveType = (uint8_t)(effectiveType - 100);
+
+            auto tct = std::dynamic_pointer_cast<objects::TokuseiCorrectTbl>(ct);
+            if(tct)
+            {
+                effectiveValue = (int32_t)TokuseiManager::CalculateAttributeValue(
+                    this, tct->GetValue(), effectiveValue, tct->GetAttributes());
+            }
+
+            calcAdjust = true;
+        }
+
+        if(effectiveType == 1 && FORCE_NUMERIC.find(tblID) != FORCE_NUMERIC.end())
+        {
+            effectiveType = 0;
+        }
+
         if((uint8_t)tblID >= (uint8_t)CorrectTbl::NRA_WEAPON &&
             (uint8_t)tblID <= (uint8_t)CorrectTbl::NRA_MAGIC)
         {
+            if(!calcState) continue;
+
             // NRA is calculated differently from everything else
-            if(ct->GetType() == 0)
+            if(effectiveType == 0)
             {
                 // For type 0, the NRA value becomes 100% and CANNOT be reduced.
-                switch(ct->GetValue())
+                switch(effectiveValue)
                 {
                 case NRA_NULL:
                     removed.insert(tblID);
-                    mNullMap[tblID] = 100;
+                    calcState->SetNullChances((int16_t)tblID, 100);
                     break;
                 case NRA_REFLECT:
                     removed.insert(tblID);
-                    mReflectMap[tblID] = 100;
+                    calcState->SetReflectChances((int16_t)tblID, 100);
                     break;
                 case NRA_ABSORB:
                     removed.insert(tblID);
-                    mAbsorbMap[tblID] = 100;
+                    calcState->SetAbsorbChances((int16_t)tblID, 100);
                     break;
                 default:
                     break;
@@ -1873,119 +2589,232 @@ void ActiveEntityState::AdjustStats(
             {
                 // For other types, reduce the value by 2 to get the NRA index
                 // and add the value supplied.
-                libcomp::EnumMap<CorrectTbl, int16_t>* m = nullptr;
-                switch(ct->GetType())
+                switch(effectiveType)
                 {
                 case (NRA_NULL + 2):
-                    m = &mNullMap;
+                    calcState->SetNullChances((int16_t)tblID, (int16_t)(
+                        calcState->GetNullChances((int16_t)tblID) + effectiveValue));
                     break;
                 case (NRA_REFLECT + 2):
-                    m = &mReflectMap;
+                    calcState->SetReflectChances((int16_t)tblID, (int16_t)(
+                        calcState->GetReflectChances((int16_t)tblID) + effectiveValue));
                     break;
                 case (NRA_ABSORB + 2):
-                    m = &mAbsorbMap;
+                    calcState->SetAbsorbChances((int16_t)tblID, (int16_t)(
+                        calcState->GetAbsorbChances((int16_t)tblID) + effectiveValue));
                     break;
                 default:
                     break;
-                }
-
-                if(m)
-                {
-                    if(m->find(tblID) == m->end())
-                    {
-                        (*m)[tblID] = 0;
-                    }
-
-                    (*m)[tblID] = (int16_t)((*m)[tblID] + ct->GetValue());
                 }
             }
         }
         else
         {
-            bool allowNegate = false;
+            libcomp::EnumMap<CorrectTbl, int32_t>* map = 0;
 
-            int16_t adjusted = stats[tblID];
-            switch(ct->GetType())
+            switch(effectiveType)
             {
             case 1:
+            case 2:
                 // Percentage sets can either be an immutable set to zero
                 // or an increase/decrease by a set amount
-                if(ct->GetValue() == 0)
+                if(effectiveValue == 0)
                 {
-                    removed.insert(tblID);
-                    adjusted = 0;
-                    allowNegate = true;
+                    // Ignore calculated values that set to 0%
+                    if(!calcAdjust)
+                    {
+                        removed.insert(tblID);
+                        stats[tblID] = 0;
+                        numericSums.erase(tblID);
+                        percentSums[0].erase(tblID);
+                        percentSums[1].erase(tblID);
+                        maxPercents.erase(tblID);
+                    }
                 }
                 else
                 {
-                    adjusted = (int16_t)(adjusted +
-                        (int16_t)(adjusted * (ct->GetValue() * 0.01)));
-                    allowNegate = ct->GetValue() < 0;
+                    size_t pIdx = (size_t)(effectiveType - 1);
+
+                    // Store max percents separately
+                    if(maxPercents.find(tblID) == maxPercents.end())
+                    {
+                        maxPercents[tblID] = effectiveValue;
+                    }
+                    else if(maxPercents[tblID] < effectiveValue)
+                    {
+                        maxPercents[tblID] = effectiveValue;
+                    }
+
+                    map = &percentSums[pIdx];
                 }
                 break;
             case 0:
-                adjusted = (int16_t)(adjusted + ct->GetValue());
-                allowNegate = (ct->GetValue() < 0) != (stats[tblID] < 0);
+                map = &numericSums;
                 break;
             default:
                 break;
             }
 
-            // Prevent overflow
-            if(!allowNegate && (stats[tblID] < 0) != (adjusted < 0))
+            if(map)
             {
-                if(adjusted >= 0)
+                if(map->find(tblID) == map->end())
                 {
-                    // Negative overflow
-                    stats[tblID] = std::numeric_limits<int16_t>::min();
+                    (*map)[tblID] = effectiveValue;
                 }
                 else
                 {
-                    // Positive overflow
-                    stats[tblID] = std::numeric_limits<int16_t>::max();
+                    (*map)[tblID] += effectiveValue;
                 }
-            }
-            else
-            {
-                stats[tblID] = adjusted;
             }
         }
     }
 
-    CharacterManager::AdjustStatBounds(stats);
+    // Now that we have all the sums, calculate stats in order
+    for(size_t i = 0; i < 126; i++)
+    {
+        CorrectTbl tblID = (CorrectTbl)i;
+
+        if(baseMode != (BASE_STATS.find(tblID) != BASE_STATS.end())) continue;
+
+        // Stats are applied in a specific order. Starting with the base
+        // value it is as follows:
+        // 1) Percentage adjustments (layer 1)
+        // 2) Numeric adjustments
+        // 3) Percentage adjustments (layer 2)
+        // HP/MP regen are special as they are dependent stats calculated from
+        // Max HP/MP after step 2.
+        for(size_t layer = 0; layer < 3; layer++)
+        {
+            if(layer == 1)
+            {
+                // Numeric adjust
+                auto it = numericSums.find(tblID);
+                if(it != numericSums.end())
+                {
+                    stats[tblID] = (int32_t)(stats[tblID] + it->second);
+                }
+
+                switch(tblID)
+                {
+                case CorrectTbl::HP_MAX:
+                    // Determine base HP regen (if not 0%)
+                    if(removed.find(CorrectTbl::HP_REGEN) == removed.end())
+                    {
+                        int32_t hpMax = stats[CorrectTbl::HP_MAX];
+                        int32_t vit = stats[CorrectTbl::VIT];
+                        stats[CorrectTbl::HP_REGEN] = (int32_t)(
+                            stats[CorrectTbl::HP_REGEN] +
+                            (int32_t)floor(((vit * 3) + hpMax) * 0.01));
+                    }
+
+                    // Add enemy only HP if it exists (can be boosted by layer
+                    // 2 effects)
+                    if(GetEntityType() == EntityType_t::ENEMY)
+                    {
+                        stats[CorrectTbl::HP_MAX] = stats[CorrectTbl::HP_MAX] +
+                            GetDevilData()->GetBattleData()->GetEnemyHP(0);
+                    }
+                    break;
+                case CorrectTbl::MP_MAX:
+                    // Determine base MP regen (if not 0%)
+                    if(removed.find(CorrectTbl::MP_REGEN) == removed.end())
+                    {
+                        int32_t mpMax = stats[CorrectTbl::MP_MAX];
+                        int32_t intel = stats[CorrectTbl::INT];
+                        stats[CorrectTbl::MP_REGEN] = (int32_t)(
+                            stats[CorrectTbl::MP_REGEN] +
+                            (int32_t)floor(((intel * 3) + mpMax) * 0.01));
+                    }
+                    break;
+                default:
+                    break;
+                }
+            }
+            else
+            {
+                // Percentage adjust
+                size_t idx = layer == 0 ? 0 : 1;
+                auto it = percentSums[idx].find(tblID);
+                if(it != percentSums[idx].end())
+                {
+                    int32_t sum = it->second;
+
+                    int32_t adjusted = stats[tblID];
+                    if(sum <= -100)
+                    {
+                        adjusted = 0;
+                    }
+                    else
+                    {
+                        adjusted = (int32_t)(adjusted +
+                            (int32_t)(adjusted * (sum * 0.01)));
+                    }
+
+                    stats[tblID] = adjusted;
+                }
+            }
+        }
+    }
+
+    // Apply stat minimum bounds (and maximum if not an enemy)
+    CharacterManager::AdjustStatBounds(stats,
+        GetEntityType() != EntityType_t::ENEMY);
+
+    // Limit max speed based on direct percentage boosts (player entities only)
+    if(!baseMode && (GetEntityType() == EntityType_t::CHARACTER ||
+        GetEntityType() == EntityType_t::PARTNER_DEMON))
+    {
+        for(CorrectTbl tblID : { CorrectTbl::MOVE1, CorrectTbl::MOVE2 })
+        {
+            // Default to 50% faster than default run speed
+            int16_t maxSpeed = 50;
+            auto moveIter = maxPercents.find(tblID);
+            if(moveIter != maxPercents.end())
+            {
+                maxSpeed = (int16_t)moveIter->second;
+            }
+
+            maxSpeed = (int16_t)ceil((double)STAT_DEFAULT_SPEED *
+                (1.0 + (double)maxSpeed * 0.01));
+            if(stats[tblID] > maxSpeed)
+            {
+                stats[tblID] = maxSpeed;
+            }
+        }
+    }
 }
 
-void ActiveEntityState::UpdateNRAChances(libcomp::EnumMap<CorrectTbl, int16_t>& stats,
+void ActiveEntityState::UpdateNRAChances(libcomp::EnumMap<CorrectTbl, int32_t>& stats,
+    std::shared_ptr<objects::CalculatedEntityState> calcState,
     const std::list<std::shared_ptr<objects::MiCorrectTbl>>& adjustments)
 {
-    // Clear existing values
-    mNullMap.clear();
-    mReflectMap.clear();
-    mAbsorbMap.clear();
+    std::unordered_map<int16_t, int16_t> mNullMap;
+    std::unordered_map<int16_t, int16_t> mReflectMap;
+    std::unordered_map<int16_t, int16_t> mAbsorbMap;
     
     // Set from base
     for(uint8_t x = (uint8_t)CorrectTbl::NRA_WEAPON;
         x <= (uint8_t)CorrectTbl::NRA_MAGIC; x++)
     {
         CorrectTbl tblID = (CorrectTbl)x;
-        int16_t val = stats[tblID];
+        int16_t val = (int16_t)stats[tblID];
         if(val > 0)
         {
             // Natural NRA is stored as NRA index in the 1s place and
-            // perccentage of success as the rest
+            // percentage of success as the rest
             double shift = (double)(val * 0.1);
             uint8_t nraIdx = (uint8_t)((shift - (double)floorl((double)val / 10.0)) * 10.0);
             val = (int16_t)floorl(val / 10);
             switch(nraIdx)
             {
                 case NRA_NULL:
-                    mNullMap[tblID] = val;
+                    mNullMap[(int16_t)tblID] = val;
                     break;
                 case NRA_REFLECT:
-                    mReflectMap[tblID] = val;
+                    mReflectMap[(int16_t)tblID] = val;
                     break;
                 case NRA_ABSORB:
-                    mAbsorbMap[tblID] = val;
+                    mAbsorbMap[(int16_t)tblID] = val;
                     break;
                 default:
                     break;
@@ -1997,7 +2826,7 @@ void ActiveEntityState::UpdateNRAChances(libcomp::EnumMap<CorrectTbl, int16_t>& 
     // relative value to add
     for(auto ct : adjustments)
     {
-        auto tblID = ct->GetID();
+        int16_t tblID = (int16_t)ct->GetID();
         switch(ct->GetType())
         {
         case NRA_NULL:
@@ -2013,14 +2842,75 @@ void ActiveEntityState::UpdateNRAChances(libcomp::EnumMap<CorrectTbl, int16_t>& 
             break;
         }
     }
+
+    calcState->SetNullChances(mNullMap);
+    calcState->SetReflectChances(mReflectMap);
+    calcState->SetAbsorbChances(mAbsorbMap);
 }
 
 void ActiveEntityState::GetAdditionalCorrectTbls(
     libcomp::DefinitionManager* definitionManager,
+    std::shared_ptr<objects::CalculatedEntityState> calcState,
     std::list<std::shared_ptr<objects::MiCorrectTbl>>& adjustments)
 {
     // 1) Gather skill adjustments
-    for(auto skillID : GetCurrentSkills())
+    auto currentSkillIDs = GetCurrentSkills();
+    ApplySkillCorrectTbls(currentSkillIDs, definitionManager, adjustments);
+
+    // 2) Gather status effect adjustments
+    for(auto ePair : GetStatusEffects())
+    {
+        auto statusData = definitionManager->GetStatusData(ePair.first);
+        for(auto ct : statusData->GetCommon()->GetCorrectTbl())
+        {
+            uint8_t multiplier = (statusData->GetBasic()->GetStackType() == 2)
+                ? ePair.second->GetStack() : 1;
+            for(uint8_t i = 0; i < multiplier; i++)
+            {
+                adjustments.push_back(ct);
+            }
+        }
+    }
+
+    // 3) Gather tokusei effective adjustments
+    for(auto tPair : calcState->GetEffectiveTokusei())
+    {
+        auto tokusei = definitionManager->GetTokuseiData(tPair.first);
+        if(tokusei && (tokusei->CorrectValuesCount() > 0 ||
+            tokusei->TokuseiCorrectValuesCount() > 0))
+        {
+            // Add the entries once for each source applying them
+            for(uint16_t i = 0; i < tPair.second; i++)
+            {
+                for(auto ct : tokusei->GetCorrectValues())
+                {
+                    adjustments.push_back(ct);
+                }
+
+                for(auto ct : tokusei->GetTokuseiCorrectValues())
+                {
+                    adjustments.push_back(ct);
+                }
+            }
+        }
+    }
+
+    // Sort the adjustments, set to 0% first, non-zero percents next, numeric last
+    adjustments.sort([](const std::shared_ptr<objects::MiCorrectTbl>& a,
+        const std::shared_ptr<objects::MiCorrectTbl>& b)
+    {
+        return ((a->GetType() % 100) > 0) &&
+            (a->GetValue() == 0 ||
+            ((b->GetType() % 100) == 0));
+    });
+}
+
+void ActiveEntityState::ApplySkillCorrectTbls(
+    const std::set<uint32_t>& skillIDs,
+    libcomp::DefinitionManager* definitionManager,
+    std::list<std::shared_ptr<objects::MiCorrectTbl>>& adjustments)
+{
+    for(auto skillID : skillIDs)
     {
         auto skillData = definitionManager->GetSkillData(skillID);
         auto common = skillData->GetCommon();
@@ -2040,7 +2930,7 @@ void ActiveEntityState::GetAdditionalCorrectTbls(
             break;
         }
 
-        if(include)
+        if(include && !DisabledSkillsContains(skillID))
         {
             for(auto ct : common->GetCorrectTbl())
             {
@@ -2048,56 +2938,118 @@ void ActiveEntityState::GetAdditionalCorrectTbls(
             }
         }
     }
-
-    // 2) Gather status effect adjustments
-    for(auto ePair : GetStatusEffects())
-    {
-        bool skipNRA = mNRAShields.find(ePair.first) != mNRAShields.end();
-
-        auto statusData = definitionManager->GetStatusData(ePair.first);
-        for(auto ct : statusData->GetCommon()->GetCorrectTbl())
-        {
-            if(skipNRA && (uint8_t)ct->GetID() >= (uint8_t)CorrectTbl::NRA_WEAPON &&
-                (uint8_t)ct->GetID() <= (uint8_t)CorrectTbl::NRA_MAGIC) continue;
-
-            uint8_t multiplier = (statusData->GetBasic()->GetStackType() == 2)
-                ? ePair.second->GetStack() : 1;
-            for(uint8_t i = 0; i < multiplier; i++)
-            {
-                adjustments.push_back(ct);
-            }
-        }
-    }
-
-    // 3) Gather tokusei direct adjustments
-    /// @todo
-
-    // Sort the adjustments, set to 0% first, non-zero percents next, numeric last
-    adjustments.sort([](const std::shared_ptr<objects::MiCorrectTbl>& a,
-        const std::shared_ptr<objects::MiCorrectTbl>& b)
-    {
-        return a->GetType() == 1 &&
-            (a->GetValue() == 0 ||
-            b->GetType() != 1);
-    });
 }
 
 uint8_t ActiveEntityState::RecalculateDemonStats(
-    libcomp::DefinitionManager* definitionManager, uint32_t demonID)
+    libcomp::DefinitionManager* definitionManager,
+    libcomp::EnumMap<CorrectTbl, int32_t>& stats,
+    std::shared_ptr<objects::CalculatedEntityState> calcState)
 {
-    std::lock_guard<std::mutex> lock(mLock);
+    bool selfState = calcState == GetCalculatedState();
+    if(selfState)
+    {
+        // Combat run speed can change from unadjusted stats
+        SetCombatRunSpeed((int16_t)stats[CorrectTbl::MOVE2]);
 
-    auto demonData = definitionManager->GetDevilData(demonID);
-    auto battleData = demonData->GetBattleData();
+        if(!mInitialCalc)
+        {
+            SetKnockbackResist((float)stats[CorrectTbl::KNOCKBACK_RESIST]);
+            mInitialCalc = true;
+        }
+    }
+
+    std::list<std::shared_ptr<objects::MiCorrectTbl>> correctTbls;
+    GetAdditionalCorrectTbls(definitionManager, calcState, correctTbls);
+
+    UpdateNRAChances(stats, calcState);
+    AdjustStats(correctTbls, stats, calcState, true);
+
+    CharacterManager::CalculateDependentStats(stats,
+        GetCoreStats()->GetLevel(), true);
+
+    uint8_t result = 0;
+    if(selfState)
+    {
+        result = CompareAndResetStats(stats, true);
+    }
+
+    AdjustStats(correctTbls, stats, calcState, false);
+
+    if(selfState)
+    {
+        return result | CompareAndResetStats(stats, false);
+    }
+    else
+    {
+        for(auto statPair : stats)
+        {
+            calcState->SetCorrectTbl((size_t)statPair.first,
+                (int16_t)statPair.second);
+        }
+
+        return 0;
+    }
+}
+
+uint8_t ActiveEntityState::RecalculateEnemyStats(
+    libcomp::DefinitionManager* definitionManager,
+    std::shared_ptr<objects::CalculatedEntityState> calcState)
+{
+    bool selfState = calcState == GetCalculatedState();
+    if(calcState == nullptr)
+    {
+        // Calculating default entity state
+        calcState = GetCalculatedState();
+        selfState = true;
+    }
+
+    if(selfState)
+    {
+        auto previousSkills = GetCurrentSkills();
+        SetCurrentSkills(GetAllSkills(definitionManager, true));
+
+        bool skillsChanged = previousSkills.size() != CurrentSkillsCount();
+        if(!skillsChanged)
+        {
+            for(uint32_t skillID : previousSkills)
+            {
+                if(!CurrentSkillsContains(skillID))
+                {
+                    skillsChanged = true;
+                    break;
+                }
+            }
+        }
+
+        // If this is an AI entity and the available skills changed or cost
+        // adjust tokusei exist, remap skills to get new options and weights
+        if(mAIState && (skillsChanged ||
+            calcState->ExistingTokuseiAspectsContains((int8_t)
+                TokuseiAspectType::HP_COST_ADJUST) ||
+            calcState->ExistingTokuseiAspectsContains((int8_t)
+                TokuseiAspectType::MP_COST_ADJUST)))
+        {
+            mAIState->ResetSkillsMapped();
+        }
+    }
+
     auto cs = GetCoreStats();
+    auto devilData = GetDevilData();
+    if(!cs || !devilData)
+    {
+        return true;
+    }
 
-    libcomp::EnumMap<CorrectTbl, int16_t> stats;
+    auto battleData = devilData->GetBattleData();
+
+    libcomp::EnumMap<CorrectTbl, int32_t> stats;
     for(size_t i = 0; i < 126; i++)
     {
         CorrectTbl tblID = (CorrectTbl)i;
         stats[tblID] = battleData->GetCorrect((size_t)i);
     }
 
+    // Non-dependent stats will not change from growth calculation
     stats[CorrectTbl::STR] = cs->GetSTR();
     stats[CorrectTbl::MAGIC] = cs->GetMAGIC();
     stats[CorrectTbl::VIT] = cs->GetVIT();
@@ -2105,27 +3057,46 @@ uint8_t ActiveEntityState::RecalculateDemonStats(
     stats[CorrectTbl::SPEED] = cs->GetSPEED();
     stats[CorrectTbl::LUCK] = cs->GetLUCK();
 
-    if(!mInitialCalc)
+    return RecalculateDemonStats(definitionManager, stats, calcState);
+}
+
+std::set<uint32_t> ActiveEntityState::GetAllEnemySkills(
+    libcomp::DefinitionManager* definitionManager, bool includeTokusei)
+{
+    std::set<uint32_t> skillIDs;
+
+    auto demonData = GetDevilData();
+
+    auto growth = demonData->GetGrowth();
+    for(auto skillSet : { growth->GetSkills(),
+        growth->GetEnemyOnlySkills() })
     {
-        SetKnockbackResist((float)stats[CorrectTbl::KNOCKBACK_RESIST]);
-        mInitialCalc = true;
+        for(uint32_t skillID : skillSet)
+        {
+            if(skillID)
+            {
+                skillIDs.insert(skillID);
+            }
+        }
     }
 
-    std::list<std::shared_ptr<objects::MiCorrectTbl>> correctTbls;
-    GetAdditionalCorrectTbls(definitionManager, correctTbls);
-
-    UpdateNRAChances(stats);
-    AdjustStats(correctTbls, stats, true);
-    CharacterManager::CalculateDependentStats(stats, cs->GetLevel(), true);
-    AdjustStats(correctTbls, stats, false);
-
-    int32_t extraHP = 0;
-    if(GetEntityType() == objects::EntityStateObject::EntityType_t::ENEMY)
+    for(uint32_t traitID : growth->GetTraits())
     {
-        extraHP = demonData->GetBattleData()->GetEnemyHP(0);
+        if(traitID)
+        {
+            skillIDs.insert(traitID);
+        }
     }
 
-    return CompareAndResetStats(stats, extraHP);
+    if(includeTokusei)
+    {
+        for(uint32_t skillID : GetEffectiveTokuseiSkills(definitionManager))
+        {
+            skillIDs.insert(skillID);
+        }
+    }
+
+    return skillIDs;
 }
 
 uint8_t ActiveEntityState::CalculateLNCType(int16_t lncPoints) const
@@ -2156,6 +3127,29 @@ void ActiveEntityState::RemoveInactiveSwitchSkills()
     }
 }
 
+std::set<uint32_t> ActiveEntityState::GetEffectiveTokuseiSkills(
+    libcomp::DefinitionManager* definitionManager)
+{
+    std::set<uint32_t> skillIDs;
+
+    for(auto tPair : GetCalculatedState()->GetEffectiveTokusei())
+    {
+        auto tokusei = definitionManager->GetTokuseiData(tPair.first);
+        if(tokusei)
+        {
+            for(auto aspect : tokusei->GetAspects())
+            {
+                if(aspect->GetType() == TokuseiAspectType::SKILL_ADD)
+                {
+                    skillIDs.insert((uint32_t)aspect->GetValue());
+                }
+            }
+        }
+    }
+
+    return skillIDs;
+}
+
 const std::set<CorrectTbl> VISIBLE_STATS =
     {
         CorrectTbl::STR,
@@ -2174,72 +3168,114 @@ const std::set<CorrectTbl> VISIBLE_STATS =
         CorrectTbl::MDEF
     };
 
-uint8_t ActiveEntityState::CompareAndResetStats(libcomp::EnumMap<CorrectTbl, int16_t>& stats,
-    int32_t extraHP)
+uint8_t ActiveEntityState::CompareAndResetStats(
+    libcomp::EnumMap<CorrectTbl, int32_t>& stats, bool dependentBase)
 {
+    // Limits are assumed to have already been applied at this point
     uint8_t result = 0;
-
-    auto cs = GetCoreStats();
-    int32_t hp = cs->GetHP();
-    int32_t mp = cs->GetMP();
-    int32_t newMaxHP = (int32_t)(extraHP + (int32_t)stats[CorrectTbl::HP_MAX]);
-    int32_t newMaxMP = (int32_t)stats[CorrectTbl::MP_MAX];
-
-    if(hp > newMaxHP)
+    if(dependentBase)
     {
-        hp = newMaxHP;
-    }
+        if(GetCLSRBase() != (int16_t)stats[CorrectTbl::CLSR]
+            || GetLNGRBase() != (int16_t)stats[CorrectTbl::LNGR]
+            || GetSPELLBase() != (int16_t)stats[CorrectTbl::SPELL]
+            || GetSUPPORTBase() != (int16_t)stats[CorrectTbl::SUPPORT]
+            || GetPDEFBase() != (int16_t)stats[CorrectTbl::PDEF]
+            || GetMDEFBase() != (int16_t)stats[CorrectTbl::MDEF])
+        {
+            result |= ENTITY_CALC_STAT_LOCAL;
+        }
 
-    if(mp > newMaxMP)
-    {
-        mp = newMaxMP;
-    }
+        SetCLSRBase((int16_t)stats[CorrectTbl::CLSR]);
+        SetLNGRBase((int16_t)stats[CorrectTbl::LNGR]);
+        SetSPELLBase((int16_t)stats[CorrectTbl::SPELL]);
+        SetSUPPORTBase((int16_t)stats[CorrectTbl::SUPPORT]);
+        SetPDEFBase((int16_t)stats[CorrectTbl::PDEF]);
+        SetMDEFBase((int16_t)stats[CorrectTbl::MDEF]);
 
-    for(auto statPair : stats)
-    {
-        SetCorrectTbl((size_t)statPair.first, statPair.second);
+        return result;
     }
+    else
+    {
+        auto cs = GetCoreStats();
+        int32_t hp = cs->GetHP();
+        int32_t mp = cs->GetMP();
+        int32_t newMaxHP = stats[CorrectTbl::HP_MAX];
+        int32_t newMaxMP = stats[CorrectTbl::MP_MAX];
 
-    if(hp != cs->GetHP()
-        || mp != cs->GetMP()
-        || GetMaxHP() != newMaxHP
-        || GetMaxMP() != newMaxMP)
-    {
-        result = ENTITY_CALC_STAT_WORLD |
-            ENTITY_CALC_STAT_LOCAL;
-    }
-    else if(GetSTR() != stats[CorrectTbl::STR]
-        || GetMAGIC() != stats[CorrectTbl::MAGIC]
-        || GetVIT() != stats[CorrectTbl::VIT]
-        || GetINTEL() != stats[CorrectTbl::INT]
-        || GetSPEED() != stats[CorrectTbl::SPEED]
-        || GetLUCK() != stats[CorrectTbl::LUCK]
-        || GetCLSR() != stats[CorrectTbl::CLSR]
-        || GetLNGR() != stats[CorrectTbl::LNGR]
-        || GetSPELL() != stats[CorrectTbl::SPELL]
-        || GetSUPPORT() != stats[CorrectTbl::SUPPORT]
-        || GetPDEF() != stats[CorrectTbl::PDEF]
-        || GetMDEF() != stats[CorrectTbl::MDEF])
-    {
-        result = ENTITY_CALC_STAT_LOCAL;
-    }
+        if(hp > newMaxHP)
+        {
+            hp = newMaxHP;
+        }
 
-    cs->SetHP(hp);
-    cs->SetMP(mp);
-    SetMaxHP(newMaxHP);
-    SetMaxMP(newMaxMP);
-    SetSTR(stats[CorrectTbl::STR]);
-    SetMAGIC(stats[CorrectTbl::MAGIC]);
-    SetVIT(stats[CorrectTbl::VIT]);
-    SetINTEL(stats[CorrectTbl::INT]);
-    SetSPEED(stats[CorrectTbl::SPEED]);
-    SetLUCK(stats[CorrectTbl::LUCK]);
-    SetCLSR(stats[CorrectTbl::CLSR]);
-    SetLNGR(stats[CorrectTbl::LNGR]);
-    SetSPELL(stats[CorrectTbl::SPELL]);
-    SetSUPPORT(stats[CorrectTbl::SUPPORT]);
-    SetPDEF(stats[CorrectTbl::PDEF]);
-    SetMDEF(stats[CorrectTbl::MDEF]);
+        if(mp > newMaxMP)
+        {
+            mp = newMaxMP;
+        }
+
+        auto calcState = GetCalculatedState();
+        if(calcState->GetCorrectTbl((size_t)CorrectTbl::MOVE1) !=
+            (int16_t)stats[CorrectTbl::MOVE1] ||
+            calcState->GetCorrectTbl((size_t)CorrectTbl::MOVE2) !=
+            (int16_t)stats[CorrectTbl::MOVE2])
+        {
+            result |= ENTITY_CALC_MOVE_SPEED;
+        }
+
+        for(auto statPair : stats)
+        {
+            if(statPair.second > (int32_t)std::numeric_limits<int16_t>::max())
+            {
+                calcState->SetCorrectTbl((size_t)statPair.first,
+                    (int16_t)std::numeric_limits<int16_t>::max());
+            }
+            else
+            {
+                calcState->SetCorrectTbl((size_t)statPair.first,
+                    (int16_t)statPair.second);
+            }
+        }
+
+        if(hp != cs->GetHP()
+            || mp != cs->GetMP()
+            || GetMaxHP() != newMaxHP
+            || GetMaxMP() != newMaxMP)
+        {
+            result |= ENTITY_CALC_STAT_WORLD |
+                ENTITY_CALC_STAT_LOCAL;
+        }
+        else if(GetSTR() != (int16_t)stats[CorrectTbl::STR]
+            || GetMAGIC() != (int16_t)stats[CorrectTbl::MAGIC]
+            || GetVIT() != (int16_t)stats[CorrectTbl::VIT]
+            || GetINTEL() != (int16_t)stats[CorrectTbl::INT]
+            || GetSPEED() != (int16_t)stats[CorrectTbl::SPEED]
+            || GetLUCK() != (int16_t)stats[CorrectTbl::LUCK]
+            || GetCLSR() != (int16_t)stats[CorrectTbl::CLSR]
+            || GetLNGR() != (int16_t)stats[CorrectTbl::LNGR]
+            || GetSPELL() != (int16_t)stats[CorrectTbl::SPELL]
+            || GetSUPPORT() != (int16_t)stats[CorrectTbl::SUPPORT]
+            || GetPDEF() != (int16_t)stats[CorrectTbl::PDEF]
+            || GetMDEF() != (int16_t)stats[CorrectTbl::MDEF])
+        {
+            result |= ENTITY_CALC_STAT_LOCAL;
+        }
+
+        cs->SetHP(hp);
+        cs->SetMP(mp);
+        SetMaxHP(newMaxHP);
+        SetMaxMP(newMaxMP);
+        SetSTR((int16_t)stats[CorrectTbl::STR]);
+        SetMAGIC((int16_t)stats[CorrectTbl::MAGIC]);
+        SetVIT((int16_t)stats[CorrectTbl::VIT]);
+        SetINTEL((int16_t)stats[CorrectTbl::INT]);
+        SetSPEED((int16_t)stats[CorrectTbl::SPEED]);
+        SetLUCK((int16_t)stats[CorrectTbl::LUCK]);
+        SetCLSR((int16_t)stats[CorrectTbl::CLSR]);
+        SetLNGR((int16_t)stats[CorrectTbl::LNGR]);
+        SetSPELL((int16_t)stats[CorrectTbl::SPELL]);
+        SetSUPPORT((int16_t)stats[CorrectTbl::SUPPORT]);
+        SetPDEF((int16_t)stats[CorrectTbl::PDEF]);
+        SetMDEF((int16_t)stats[CorrectTbl::MDEF]);
+    }
 
     return result;
 }

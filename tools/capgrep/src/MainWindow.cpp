@@ -574,8 +574,13 @@ void MainWindow::loadCaptures(const QStringList& inPaths)
             foreach(CaptureLoadData *cap, capData)
             {
                 delete cap->file;
+                cap->file = nullptr;
+
                 delete cap->state;
+                cap->state = nullptr;
+
                 delete cap;
+                cap = nullptr;
             }
 
             QMessageBox::critical(this, tr("Capture File Error"),
@@ -594,8 +599,6 @@ void MainWindow::loadCaptures(const QStringList& inPaths)
         {
             foreach(CaptureLoadData *cap, capData)
             {
-                delete cap->file;
-                delete cap->state;
                 delete cap;
             }
 

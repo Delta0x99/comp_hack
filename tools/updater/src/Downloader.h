@@ -8,7 +8,7 @@
  *
  * This tool will update the game client.
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -34,9 +34,9 @@
 #include <QString>
 #include <QStringList>
 #include <QCryptographicHash>
+#include <QNetworkReply>
 #include <PopIgnore.h>
 
-class QNetworkReply;
 class QNetworkAccessManager;
 
 class FileData
@@ -59,6 +59,7 @@ public:
     ~Downloader();
 
     void triggerKill();
+    void setURL(const QString& url);
 
 signals:
     void updateKilled();
@@ -80,7 +81,7 @@ protected slots:
     void expressFinish(const QString& msg = QString());
     void advanceToNextFile();
 
-    void requestError();
+    void requestError(QNetworkReply::NetworkError code);
     void requestReadyRead();
     void requestFinished();
 
@@ -120,6 +121,10 @@ protected:
 
     QList<FileData*> mFiles;
     QMap<QString, FileData*> mOldFiles;
+
+    QString mActiveURL;
+    QString mActivePath;
+    int mActiveRetries;
 };
 
 #endif // TOOLS_UPDATER_SRC_DOWNLOADER_H

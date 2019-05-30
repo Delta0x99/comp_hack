@@ -9,7 +9,7 @@
  *
  * This file is part of the World Server (world).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -42,6 +42,7 @@
 #include <ClanMember.h>
 
 // world Includes
+#include "CharacterManager.h"
 #include "WorldServer.h"
 
 using namespace world;
@@ -73,9 +74,9 @@ void ClanForm(std::shared_ptr<WorldServer> server,
         clan->SetBaseZoneID(baseZoneID);
 
         auto clanMaster = libcomp::PersistentObject::New<objects::ClanMember>(true);
-        clanMaster->SetClan(clan);
+        clanMaster->SetClan(clan->GetUUID());
         clanMaster->SetMemberType(objects::ClanMember::MemberType_t::MASTER);
-        clanMaster->SetCharacter(character);
+        clanMaster->SetCharacter(character->GetUUID());
 
         clan->AppendMembers(clanMaster);
 
@@ -297,16 +298,26 @@ bool Parsers::ClanUpdate::Parse(libcomp::ManagerPacket *pPacketManager,
 
             libcomp::String targetName = p.ReadString16Little(
                 libcomp::Convert::Encoding_t::ENCODING_UTF8, true);
-
-            if((InternalPacketAction_t)mode == InternalPacketAction_t::PACKET_ACTION_YN_REQUEST)
+            
+            // Clan invite accept
+            if(clanID == 0 && !targetName.IsEmpty())
             {
-                // Clan invite
-                ClanInvite(server, connection, clanID, cLogin, targetName);
+                // Only the target name is known, get the clan ID
+                auto targetLogin = characterManager->GetCharacterLogin(targetName);
+                clanID = targetLogin ? targetLogin->GetClanID() : 0;
             }
-            else
+
+            if(clanID)
             {
-                // Clan invite accept
-                characterManager->ClanJoin(cLogin, clanID);
+                if((InternalPacketAction_t)mode == InternalPacketAction_t::PACKET_ACTION_YN_REQUEST)
+                {
+                    // Clan invite
+                    ClanInvite(server, connection, clanID, cLogin, targetName);
+                }
+                else
+                {
+                    characterManager->ClanJoin(cLogin, clanID);
+                }
             }
 
             return true;

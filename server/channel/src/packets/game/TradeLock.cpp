@@ -8,7 +8,7 @@
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -34,11 +34,13 @@
 // object Includes
 #include <Account.h>
 #include <Character.h>
-#include <TradeSession.h>
+#include <PlayerExchangeSession.h>
 
 // channel Includes
 #include "ChannelServer.h"
+#include "CharacterManager.h"
 #include "ClientState.h"
+#include "ManagerConnection.h"
 
 using namespace channel;
 
@@ -57,32 +59,35 @@ bool Parsers::TradeLock::Parse(libcomp::ManagerPacket *pPacketManager,
     auto client = std::dynamic_pointer_cast<ChannelClientConnection>(connection);
     auto state = client->GetClientState();
     auto cState = state->GetCharacterState();
-    auto tradeSession = state->GetTradeSession();
+    auto exchangeSession = state->GetExchangeSession();
 
-    auto otherCState = std::dynamic_pointer_cast<CharacterState>(
-        state->GetTradeSession()->GetOtherCharacterState());
-    auto otherChar = otherCState != nullptr ? otherCState->GetEntity() : nullptr;
-    auto otherClient = otherChar != nullptr ?
-        server->GetManagerConnection()->GetClientConnection(
-            otherChar->GetAccount()->GetUsername()) : nullptr;
-    if(!otherClient)
+    bool success = false;
+
+    auto otherCState = exchangeSession ? std::dynamic_pointer_cast<CharacterState>(
+        exchangeSession->GetOtherCharacterState()) : nullptr;
+    auto otherClient = otherCState ? server->GetManagerConnection()->GetEntityClient(
+        otherCState->GetEntityID(), false) : nullptr;
+    if(otherClient)
     {
-        characterManager->EndTrade(client);
-        return true;
-    }
+        exchangeSession->SetLocked(true);
 
-    auto otherTradeSession = otherClient->GetClientState()->GetTradeSession();
-    tradeSession->SetLocked(true);
+        libcomp::Packet notify;
+        notify.WritePacketCode(ChannelToClientPacketCode_t::PACKET_TRADE_LOCKED);
+
+        otherClient->SendPacket(notify);
+
+        success = true;
+    }
+    else
+    {
+        characterManager->EndExchange(client);
+    }
 
     libcomp::Packet reply;
     reply.WritePacketCode(ChannelToClientPacketCode_t::PACKET_TRADE_LOCK);
-    reply.WriteS32Little(0);    // Successfully locked
+    reply.WriteS32Little(success ? 0 : -1);
+
     client->SendPacket(reply);
-
-    reply.Clear();
-    reply.WritePacketCode(ChannelToClientPacketCode_t::PACKET_TRADE_LOCKED);
-
-    otherClient->SendPacket(reply);
 
     return true;
 }

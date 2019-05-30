@@ -1,4 +1,17 @@
 obj-*
 build*
+cmake-build-*
 debian/*.log
 deps/*.zip
+deps/libcomp/
+binaries/
+
+*.sublime-project
+
+*.sublime-workspace
+
+tests/config\.nut
+
+# Build the dream.
+dream/
+tools/sandman/

@@ -9,7 +9,7 @@
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -38,6 +38,8 @@
 
 // channel Includes
 #include "ChannelServer.h"
+#include "CharacterManager.h"
+#include "ZoneManager.h"
 
 using namespace channel;
 
@@ -67,7 +69,7 @@ bool Parsers::LootBossBox::Parse(libcomp::ManagerPacket *pPacketManager,
     reply.WriteS32Little(lootEntityID);
 
     auto lState = zone ? zone->GetLootBox(lootEntityID) : nullptr;
-    if(lState)
+    if(lState && zone->ClaimBossBox(lootEntityID, state->GetWorldCID()))
     {
         // If the loot time has not already started, set to 60 minutes
         auto lBox = lState->GetEntity();
@@ -90,7 +92,7 @@ bool Parsers::LootBossBox::Parse(libcomp::ManagerPacket *pPacketManager,
     }
     else
     {
-        reply.WriteS8(-1);   // Failure
+        reply.WriteS8(-1);   // One person, one box error
 
         client->SendPacket(reply);
     }

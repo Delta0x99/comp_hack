@@ -9,7 +9,7 @@
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -41,6 +41,8 @@
 
 // channel Includes
 #include "ChannelServer.h"
+#include "ManagerConnection.h"
+#include "SkillManager.h"
 
 using namespace channel;
 
@@ -70,8 +72,9 @@ bool Parsers::ClanForm::Parse(libcomp::ManagerPacket *pPacketManager,
     int8_t errorCode = 0;
 
     auto sourceState = state->GetEntityState(entityID);
-    auto activatedAbility = sourceState ? sourceState->GetActivatedAbility() : nullptr;
-    if(!activatedAbility || activatedAbility->GetActivationID() != activationID)
+    auto activatedAbility = sourceState
+        ? sourceState->GetSpecialActivations(activationID) : nullptr;
+    if(!activatedAbility)
     {
         // Request is invalid but don't kill the connection or cancel the skill
         errorCode = ERR_FAIL;
@@ -97,7 +100,7 @@ bool Parsers::ClanForm::Parse(libcomp::ManagerPacket *pPacketManager,
         {
             auto item = std::dynamic_pointer_cast<objects::Item>(
                 libcomp::PersistentObject::GetObjectByUUID(
-                state->GetObjectUUID(activatedAbility->GetTargetObjectID())));
+                state->GetObjectUUID(activatedAbility->GetActivationObjectID())));
 
             uint32_t itemID = item ? item->GetType() : 0;
             auto baseZoneIter = SVR_CONST.CLAN_FORM_MAP.find(itemID);
@@ -131,7 +134,7 @@ bool Parsers::ClanForm::Parse(libcomp::ManagerPacket *pPacketManager,
 
         client->SendPacket(reply);
 
-        server->GetSkillManager()->CancelSkill(sourceState, (uint8_t)activationID);
+        server->GetSkillManager()->CancelSkill(sourceState, activationID);
     }
 
     return true;

@@ -8,7 +8,7 @@
  *
  * This file is part of the Lobby Server (lobby).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -32,9 +32,6 @@
 #include <Worker.h>
 
 // lobby Includes
-#include "AccountManager.h"
-#include "ManagerConnection.h"
-#include "SessionManager.h"
 #include "World.h"
 
 namespace objects
@@ -46,6 +43,10 @@ class SetupConfig;
 
 namespace lobby
 {
+
+class AccountManager;
+class LobbySyncManager;
+class ManagerConnection;
 
 class LobbyServer : public libcomp::BaseServer
 {
@@ -137,19 +138,40 @@ public:
     AccountManager* GetAccountManager();
 
     /**
-     * Get the session manager for the server.
-     * @return Session manager for the server.
+     * Get a pointer to the data sync manager.
+     * @return Pointer to the LobbySyncManager
      */
-    SessionManager* GetSessionManager();
+    LobbySyncManager* GetLobbySyncManager() const;
+
+    /**
+     * Get the same fake salt for an account that does not exist.
+     * @return A fake salt for an account that does not exist.
+     */
+    libcomp::String GetFakeAccountSalt(const libcomp::String& username);
+
+    /**
+     * Import an account into the database.
+     * @param data XML data for the account.
+     * @param worldID ID of the world to import the characters into.
+     * @returns Error string or an empty string on success.
+     */
+    libcomp::String ImportAccount(const libcomp::String& data,
+        uint8_t worldID = 0);
+
+    /**
+     * Check if an import object may be imported.
+     * @param objectType Type string for the object.
+     * @param obj Object to check.
+     * @param lobbyDB Database for the lobby.
+     * @param worldDB Database for the world.
+     * @returns Error string or an empty string if the object is good.
+     */
+    libcomp::String CheckImportObject(const libcomp::String& objectType,
+        const std::shared_ptr<libcomp::PersistentObject>& obj,
+        const std::shared_ptr<libcomp::Database>& lobbyDB,
+        const std::shared_ptr<libcomp::Database>& worldDB);
 
 protected:
-    /**
-     * Set up required test data for unit testing, removing the
-     * need for human interaction via the usual prompt.
-     * @return true on success, false on failure
-     */
-    bool InitializeTestMode();
-
     /**
      * Create the first account when none currently exist
      * in the connected database via PromptCreateAccount.
@@ -195,10 +217,16 @@ protected:
     bool mUnitTestMode;
 
     /// Account manager for the server.
-    AccountManager mAccountManager;
+    AccountManager* mAccountManager;
 
-    /// Session manager for the server.
-    SessionManager mSessionManager;
+    /// Data sync manager for the server.
+    LobbySyncManager* mSyncManager;
+
+    /// Lock for the fake salts.
+    std::mutex mFakeSaltsLock;
+
+    /// Mapping of fake salts for usernames that do not exist.
+    std::unordered_map<libcomp::String, libcomp::String> mFakeSalts;
 };
 
 } // namespace lobby

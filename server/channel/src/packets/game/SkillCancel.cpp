@@ -8,7 +8,7 @@
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -32,6 +32,7 @@
 
 // channel Includes
 #include "ChannelServer.h"
+#include "SkillManager.h"
 
 using namespace channel;
 
@@ -50,17 +51,19 @@ bool Parsers::SkillCancel::Parse(libcomp::ManagerPacket *pPacketManager,
     auto skillManager = server->GetSkillManager();
 
     int32_t sourceEntityID = p.ReadS32Little();
-    uint8_t activationID = p.ReadU8();
+    int8_t activationID = p.ReadS8();
     
     auto source = state->GetEntityState(sourceEntityID);
     if(!source)
     {
-        LOG_ERROR("Invalid skill source sent from client for skill cancellation\n");
-        return false;
+        LOG_ERROR(libcomp::String("Invalid skill source sent from client for"
+            " skill cancellation: %1\n").Arg(state->GetAccountUID().ToString()));
+        client->Close();
+        return true;
     }
 
     server->QueueWork([](SkillManager* pSkillManager, const std::shared_ptr<
-        ActiveEntityState> pSource, uint8_t pActivationID)
+        ActiveEntityState> pSource, int8_t pActivationID)
         {
             pSkillManager->CancelSkill(pSource, pActivationID);
         }, skillManager, source, activationID);

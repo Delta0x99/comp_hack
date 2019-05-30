@@ -4,13 +4,13 @@
  *
  * @author HACKfrost
  *
- * @brief Request from the client to sync the player character data. This
- *  happens if the client expected an expiration to take place that the
- *  server never sent.
+ * @brief Request from the client to sync the player character (or partner
+ *  demon) data. This happens if the client expected an expiration to take
+ *  place that the server never sent.
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -29,6 +29,7 @@
 #include "Packets.h"
 
 // libcomp Includes
+#include <DefinitionManager.h>
 #include <Log.h>
 #include <ManagerPacket.h>
 #include <Packet.h>
@@ -36,6 +37,7 @@
 
 // channel Includes
 #include "ChannelServer.h"
+#include "ZoneManager.h"
 
 using namespace channel;
 
@@ -53,18 +55,17 @@ bool Parsers::SyncCharacter::Parse(libcomp::ManagerPacket *pPacketManager,
     auto server = std::dynamic_pointer_cast<ChannelServer>(pPacketManager->GetServer());
     auto client = std::dynamic_pointer_cast<ChannelClientConnection>(connection);
     auto state = client->GetClientState();
-    auto cState = state->GetCharacterState();
-    auto cs = cState->GetCoreStats();
+    auto eState = state->GetEntityState(entityID);
 
-    if(cState->GetEntityID() != entityID)
+    if(eState == nullptr)
     {
-        LOG_ERROR(libcomp::String("Character not belonging to the client"
+        LOG_ERROR(libcomp::String("Entity not belonging to the client"
             " requested for SyncCharacter: %1\n").Arg(entityID));
         return true;
     }
 
-    auto statusEffects = cState->GetCurrentStatusEffectStates(
-        server->GetDefinitionManager());
+    auto cs = eState->GetCoreStats();
+    auto statusEffects = eState->GetCurrentStatusEffectStates();
 
     libcomp::Packet reply;
     reply.WritePacketCode(ChannelToClientPacketCode_t::PACKET_SYNC_CHARACTER);

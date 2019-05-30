@@ -8,7 +8,7 @@
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -27,12 +27,14 @@
 #include "Packets.h"
 
 // libcomp Includes
+#include <Log.h>
 #include <ManagerPacket.h>
 #include <Packet.h>
 #include <PacketCodes.h>
 
 // channel Includes
 #include "ChannelServer.h"
+#include "ChatManager.h"
 
 using namespace channel;
 
@@ -45,8 +47,11 @@ bool Parsers::Tell::Parse(libcomp::ManagerPacket *pPacketManager,
         return false;
     }
 
+    auto server = std::dynamic_pointer_cast<ChannelServer>(
+        pPacketManager->GetServer());
+    auto chatManager = server->GetChatManager();
+
     auto client = std::dynamic_pointer_cast<ChannelClientConnection>(connection);
-    auto server = std::dynamic_pointer_cast<ChannelServer>(pPacketManager->GetServer());
     auto state = client->GetClientState();
 
     libcomp::String targetName = p.ReadString16Little(
@@ -54,7 +59,11 @@ bool Parsers::Tell::Parse(libcomp::ManagerPacket *pPacketManager,
     libcomp::String message = p.ReadString16Little(
         state->GetClientStringEncoding(), true);
 
-    server->GetChatManager()->SendTellMessage(client, message, targetName);
+    if(!chatManager->HandleGMand(client, message) &&
+        !chatManager->SendTellMessage(client, message, targetName))
+    {
+        LOG_ERROR("Tell message could not be sent.\n");
+    }
 
     return true;
 }

@@ -8,7 +8,7 @@
  *
  * This file is part of the World Server (world).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -40,12 +40,12 @@
 #include <RegisteredChannel.h>
 #include <RegisteredWorld.h>
 
-// world Includes
-#include "AccountManager.h"
-#include "CharacterManager.h"
-
 namespace world
 {
+
+class AccountManager;
+class CharacterManager;
+class WorldSyncManager;
 
 class WorldServer : public libcomp::BaseServer
 {
@@ -118,12 +118,6 @@ public:
     uint8_t GetNextChannelID() const;
 
     /**
-     * Get the preferred channel to log into for a client in the lobby.
-     * @return Pointer to the RegisteredChannel
-     */
-    std::shared_ptr<objects::RegisteredChannel> GetLoginChannel() const;
-
-    /**
      * Get a pointer to the lobby connection.
      * @return Pointer to the lobby connection
      */
@@ -179,7 +173,13 @@ public:
      * Get the character manager for the server.
      * @return Character manager for the server.
      */
-    CharacterManager* GetCharacterManager();
+    CharacterManager* GetCharacterManager() const;
+
+    /**
+     * Get a pointer to the data sync manager.
+     * @return Pointer to the WorldSyncManager
+     */
+    WorldSyncManager* GetWorldSyncManager() const;
 
     /**
      * Build the data-less relay packet from and targetting the supplied
@@ -232,10 +232,16 @@ protected:
     std::shared_ptr<ManagerConnection> mManagerConnection;
 
     /// Account manager for the server.
-    AccountManager mAccountManager;
+    AccountManager* mAccountManager;
 
     /// Character manager for the server.
     CharacterManager* mCharacterManager;
+
+    /// Data sync manager for the server.
+    WorldSyncManager* mSyncManager;
+
+    /// Server lock for shared resources
+    std::mutex mLock;
 };
 
 } // namespace world

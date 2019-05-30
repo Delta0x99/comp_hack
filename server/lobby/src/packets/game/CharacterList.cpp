@@ -8,7 +8,7 @@
  *
  * This file is part of the Lobby Server (lobby).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -43,6 +43,7 @@
 #include <Item.h>
 
 // Lobby Includes
+#include "AccountManager.h"
 #include "LobbyClientConnection.h"
 
 using namespace lobby;
@@ -59,29 +60,21 @@ bool Parsers::CharacterList::Parse(libcomp::ManagerPacket *pPacketManager,
     }
 
     auto server = std::dynamic_pointer_cast<LobbyServer>(pPacketManager->GetServer());
+    auto config = std::dynamic_pointer_cast<objects::LobbyConfig>(server->GetConfig());
     auto accountManager = server->GetAccountManager();
     auto lobbyDB = server->GetMainDatabase();
     auto lobbyConnection = std::dynamic_pointer_cast<LobbyClientConnection>(connection);
     auto account = lobbyConnection->GetClientState()->GetAccount().Get();
 
-    libcomp::Packet reply;
-    reply.WritePacketCode(
-        LobbyToClientPacketCode_t::PACKET_CHARACTER_LIST);
-
-    // Time of last login.
-    reply.WriteU32Little(account->GetLastLogin());
-
-    // Number of character tickets.
-    reply.WriteU8(account->GetTicketCount());
-
-    std::list<std::shared_ptr<objects::Character>> characters;
+    std::set<std::shared_ptr<objects::Character>> characters;
     for(auto world : server->GetWorlds())
     {
         if(world->GetRegisteredWorld()->GetStatus()
             == objects::RegisteredWorld::Status_t::INACTIVE) continue;
 
         auto worldDB = world->GetWorldDatabase();
-        auto characterList = objects::Character::LoadCharacterListByAccount(worldDB, account);
+        auto characterList = objects::Character::LoadCharacterListByAccount(
+            worldDB, account->GetUUID());
         for(auto character : characterList)
         {
             // Always reload
@@ -94,76 +87,74 @@ bool Parsers::CharacterList::Parse(libcomp::ManagerPacket *pPacketManager,
                     loaded &= equip.IsNull() || equip.Get(worldDB) != nullptr;
                     if(!loaded) break;
                 }
-            }
 
-            if(!loaded)
-            {
-                LOG_ERROR(libcomp::String("Character CID %1 could not be loaded fully.\n")
-                    .Arg(character->GetCID()));
-            }
-            else
-            {
-                characters.push_back(character);
-            }
-        }
-    }
-    characters.sort([](const std::shared_ptr<objects::Character>& a,
-        const std::shared_ptr<objects::Character>& b) { return a->GetCID() < b->GetCID(); });
-
-    //Correct the character array if needed
-    if(characters.size() > 0)
-    {
-        bool updated = false;
-        for(auto character : characters)
-        {
-            auto cid = character->GetCID();
-            auto existing = account->GetCharacters(cid).Get();
-            if(existing != nullptr)
-            {
-                if(existing->GetUUID() != character->GetUUID())
+                if(!loaded)
                 {
-                    LOG_ERROR(libcomp::String("Duplicate CID %1 encountered for account %2\n")
-                        .Arg(cid)
-                        .Arg(account->GetUUID().ToString()));
-                    return false;
+                    // This is not a hard failure, let the channel correct
+                    LOG_ERROR(libcomp::String("One or more equipped items"
+                        " failed to load: %1\n")
+                        .Arg(character->GetUUID().ToString()));
                 }
+
+                characters.insert(character);
             }
             else
             {
-                account->SetCharacters(cid, character);
-                updated = true;
-            }
-        }
-
-        if(updated)
-        {
-            if(!account->Update(lobbyDB))
-            {
-                LOG_ERROR(libcomp::String("Account character map failed to save %1\n")
-                    .Arg(account->GetUUID().ToString()));
-                return false;
+                // If stats can't load, we need to exclude the character
+                LOG_ERROR(libcomp::String("Character stats coul not be"
+                    " loaded: %1\n").Arg(character->GetUUID().ToString()));
             }
         }
     }
 
-    auto cidsToDelete = accountManager->GetCharactersForDeletion(account->GetUsername());
-
-    characters.remove_if([cidsToDelete]
-        (const std::shared_ptr<objects::Character>& character)
-        {
-            return std::find(cidsToDelete.begin(), cidsToDelete.end(), character->GetCID())
-                != cidsToDelete.end();
-        });
-
-    // Number of characters.
-    reply.WriteU8(static_cast<uint8_t>(characters.size()));
-
-    for(auto character : characters)
+    auto deletes = accountManager->GetCharactersForDeletion(account);
+    if(deletes.size() > 0)
     {
-        auto stats = character->GetCoreStats();
+        // Handle deletes before continuing
+        for(auto deleteChar : deletes)
+        {
+            accountManager->DeleteCharacter(account, deleteChar);
+            characters.erase(deleteChar);
+        }
+    }
+
+    libcomp::Packet reply;
+    reply.WritePacketCode(
+        LobbyToClientPacketCode_t::PACKET_CHARACTER_LIST);
+
+    // Time of last login.
+    reply.WriteU32Little(account->GetLastLogin());
+
+    // Number of character tickets.
+    reply.WriteU8(account->GetTicketCount());
+
+    // Double back later and write the number of characters afer they
+    // have been successfully written to the packet
+    uint8_t charCount = 0;
+    reply.WriteU8(0);
+
+    for(uint8_t cid = 0; cid < MAX_CHARACTER; cid++)
+    {
+        auto character = account->GetCharacters(cid).Get();
+
+        // Skip if the character is not in a connected world or otherwise
+        // not loaded
+        if(!character) continue;
+
+        auto stats = character->GetCoreStats().Get();
+
+        if(!stats)
+        {
+            LOG_ERROR(libcomp::String("Character was loaded but stats are no"
+                " longer loaded: %1\n").Arg(character->GetUUID().ToString()));
+            continue;
+        }
+
+        // Increase the count to write to the packet
+        charCount++;
 
         // Character ID.
-        reply.WriteU8(character->GetCID());
+        reply.WriteU8(cid);
 
         // World ID.
         reply.WriteU8(character->GetWorldID());
@@ -182,7 +173,8 @@ bool Parsers::CharacterList::Parse(libcomp::ManagerPacket *pPacketManager,
 
         // Total play time? (0 shows opening cutscene)
         /// @todo: verify/implement properly
-        reply.WriteU32Little(level == -1 ? 0 : 1);
+        reply.WriteU32Little(level == -1 && config->GetPlayOpeningMovie()
+            ? 0 : 1);
 
         // Last channel used???
         reply.WriteS8(-1);
@@ -205,11 +197,11 @@ bool Parsers::CharacterList::Parse(libcomp::ManagerPacket *pPacketManager,
         // Hair color.
         reply.WriteU8(character->GetHairColor());
 
-        // Left eye color.
-        reply.WriteU8(character->GetLeftEyeColor());
-
         // Right eye color.
         reply.WriteU8(character->GetRightEyeColor());
+
+        // Left eye color.
+        reply.WriteU8(character->GetLeftEyeColor());
 
         // Unknown values.
         reply.WriteU8(0);
@@ -218,9 +210,9 @@ bool Parsers::CharacterList::Parse(libcomp::ManagerPacket *pPacketManager,
         // Equipment
         for(size_t i = 0; i < 15; i++)
         {
-            auto equip = character->GetEquippedItems(i);
+            auto equip = character->GetEquippedItems(i).Get();
 
-            if(!equip.IsNull())
+            if(equip)
             {
                 reply.WriteU32Little(equip->GetType());
             }
@@ -231,28 +223,24 @@ bool Parsers::CharacterList::Parse(libcomp::ManagerPacket *pPacketManager,
             }
         }
 
-        // Unknown value
-        reply.WriteBlank(4);
-
-        // Since this is the only place we need to retrieve stats
-        // on this server, unload it and if the character is not cached
-        // somewhere aside from the stats lookup, let it unload now
-        libcomp::ObjectReference<objects::EntityStats>::Unload(
-            character->GetCoreStats().GetUUID());
+        // VA
+        reply.WriteS32Little((int32_t)character->EquippedVACount());
+        for(uint8_t i = 0; i <= MAX_VA_INDEX; i++)
+        {
+            uint32_t va = character->GetEquippedVA(i);
+            if(va)
+            {
+                reply.WriteS8((int8_t)i);
+                reply.WriteU32Little(va);
+            }
+        }
     }
+
+    // Now write the character count
+    reply.Seek(7);
+    reply.WriteU8(charCount);
 
     connection->SendPacket(reply);
-
-    for(auto cid : cidsToDelete)
-    {
-        server->QueueWork([](const libcomp::String username,
-            uint8_t c, std::shared_ptr<LobbyServer> s)
-        {
-            s->GetAccountManager()->DeleteCharacter(username,
-                c, s);
-
-        }, account->GetUsername(), cid, server);
-    }
 
     return true;
 }

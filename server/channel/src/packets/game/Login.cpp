@@ -8,7 +8,7 @@
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -53,6 +53,9 @@ bool Parsers::Login::Parse(libcomp::ManagerPacket *pPacketManager,
     // Classic authentication method: username followed by the session key
     libcomp::String username = p.ReadString16(libcomp::Convert::ENCODING_UTF8, true);
     uint32_t sessionKey = p.ReadU32Little();
+
+    connection->SetName(libcomp::String("%1:%2").Arg(
+        connection->GetName()).Arg(username));
 
     auto server = std::dynamic_pointer_cast<ChannelServer>(pPacketManager->GetServer());
     auto client = std::dynamic_pointer_cast<ChannelClientConnection>(connection);

@@ -29,15 +29,19 @@ GENERATE_DOCS(doc/Doxyfile.in)
 FILE(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/objgen)
 
 SET(${PROJECT_NAME}_SRCS
+    ${CMAKE_SOURCE_DIR}/libcomp/libcomp/src/WindowsServiceMain.cpp
+
     src/AccountManager.cpp
     src/ApiHandler.cpp
     src/ClientState.cpp
+    src/ImportHandler.cpp
     src/LobbyClientConnection.cpp
     src/LobbyServer.cpp
+    src/LoginHandlerThread.cpp
+    src/LobbySyncManager.cpp
     src/LoginWebHandler.cpp
     src/ManagerClientPacket.cpp
     src/ManagerConnection.cpp
-    src/SessionManager.cpp
     src/World.cpp
     src/main.cpp
 )
@@ -52,10 +56,11 @@ SET(${PROJECT_NAME}_HDRS
     src/ClientState.h
     src/LobbyClientConnection.h
     src/LobbyServer.h
+    src/LoginHandlerThread.h
+    src/LobbySyncManager.h
     src/LoginWebHandler.h
     src/ManagerClientPacket.h
     src/ManagerConnection.h
-    src/SessionManager.h
     src/World.h
 
     ${CMAKE_CURRENT_BINARY_DIR}/res/login/ResourceLogin.h
@@ -64,6 +69,7 @@ SET(${PROJECT_NAME}_HDRS
 SET(${PROJECT_NAME}_SCHEMA
     schema/clientstate.xml
     schema/lobbyconfig.xml
+    schema/loginscript.xml
 )
 
 SOURCE_GROUP("objgen" ${CMAKE_CURRENT_BINARY_DIR}/objgen/*)
@@ -77,13 +83,17 @@ OBJGEN_XML(${PROJECT_NAME}_STRUCTS
 
     # Include paths
     schema
-    ../../libcomp/schema
+    ../../libcomp/libcomp/schema
 
     # Output files
     ClientStateObject.h
     ClientStateObject.cpp
     LobbyConfig.h
     LobbyConfig.cpp
+    LoginScriptRequest.h
+    LoginScriptRequest.cpp
+    LoginScriptReply.h
+    LoginScriptReply.cpp
 )
 
 SOURCE_GROUP("Source Files\\Packets\\Game" src/packets/game/*)
@@ -105,7 +115,13 @@ SET(${PROJECT_NAME}_PACKETS
     src/packets/internal/SetChannelInfo.cpp    # 0x1003
     src/packets/internal/AccountLogin.cpp      # 0x1004
     src/packets/internal/AccountLogout.cpp     # 0x1005
+    src/packets/internal/DataSync.cpp          # 0x1007
+    src/packets/internal/WebGame.cpp           # 0x100C
 )
+
+IF(SINGLE_SOURCE_PACKETS)
+    COMBINE_PACKETS(${PROJECT_NAME}_PACKETS)
+ENDIF(SINGLE_SOURCE_PACKETS)
 
 ADD_CUSTOM_COMMAND(
     OUTPUT
@@ -140,12 +156,21 @@ TARGET_INCLUDE_DIRECTORIES(${PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_BINARY_DIR}/res/login
 )
 
-TARGET_LINK_LIBRARIES(${PROJECT_NAME} ${CMAKE_THREAD_LIBS_INIT} comp tinyxml2
-    civetweb-cxx civetweb jsonbox)
+TARGET_LINK_LIBRARIES(${PROJECT_NAME} ${CMAKE_THREAD_LIBS_INIT} config comp
+    tinyxml2 civetweb-cxx civetweb jsonbox)
+
+IF(USE_COTIRE)
+    cotire(${PROJECT_NAME})
+ENDIF(USE_COTIRE)
 
 UPX_WRAP(${PROJECT_NAME})
 
-INSTALL(TARGETS ${PROJECT_NAME} DESTINATION ${COMP_INSTALL_DIR})
+INSTALL(TARGETS ${PROJECT_NAME} DESTINATION ${COMP_INSTALL_DIR} COMPONENT lobby)
+
+# Include the PDB file if on Windows
+IF(WIN32)
+    INSTALL(FILES $<TARGET_PDB_FILE:${PROJECT_NAME}> DESTINATION ${COMP_INSTALL_DIR} COMPONENT lobby)
+ENDIF(WIN32)
 
 RSPEC_TESTS(
     LobbyAPI

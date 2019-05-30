@@ -8,7 +8,7 @@
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2017 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -32,14 +32,20 @@
 #include <PacketCodes.h>
 
 // object includes
+#include <ServerNPC.h>
+#include <ServerObject.h>
 #include <ServerZone.h>
 #include <ServerZoneSpot.h>
 
 // Standard C++14 Includes
+#include <PushIgnore.h>
 #include <gsl/gsl>
+#include <PopIgnore.h>
 
 // channel Includes
+#include "ActionManager.h"
 #include "ChannelServer.h"
+#include "ZoneManager.h"
 
 using namespace channel;
 
@@ -67,29 +73,91 @@ bool Parsers::ObjectInteraction::Parse(libcomp::ManagerPacket *pPacketManager,
         connection);
     auto server = std::dynamic_pointer_cast<ChannelServer>(
         pPacketManager->GetServer());
-    auto zone = server->GetZoneManager()->GetZoneInstance(client);
-    auto zoneDef = zone->GetDefinition();
+    auto zone = server->GetZoneManager()->GetCurrentZone(client);
+    auto zoneDef = zone ? zone->GetDefinition() : nullptr;
 
-    std::list<std::shared_ptr<objects::Action>> actions;
-
-    // Lookup the spot and see if it has actions.
-    std::shared_ptr<objects::EntityStateObject> entity = zone->GetNPC(entityID);
-
-    // Look for an object if there is no NPC by that name.
-    if(!entity)
+    // If the client is no longer in a valid zone, do nothing
+    if(!zoneDef)
     {
-        entity = zone->GetServerObject(entityID);
+        return true;
     }
 
-    /// @todo Implement better checks? In range of entity?
+    // Lookup the entity to gather actions.
+    std::shared_ptr<objects::EntityStateObject> objState;
+    std::shared_ptr<objects::ServerObject> objDef;
 
-    LOG_DEBUG(libcomp::String("Interacted with entity %1\n").Arg(entityID));
+    /// @todo: Implement proper hidden checks (per client) if distance
+    /// based entity showing is added
+    bool isHidden = false;
 
-    if(entity)
+    auto npc = zone->GetNPC(entityID);
+    if(npc)
     {
+        objState = npc;
+        objDef = npc->GetEntity();
+    }
+    else
+    {
+        // Look for an object if there is no NPC by that ID.
+        auto obj = zone->GetServerObject(entityID);
+        if(obj)
+        {
+            objState = obj;
+            objDef = obj->GetEntity();
+        }
+    }
+
+    bool valid = false;
+    if(objDef)
+    {
+        auto state = client->GetClientState();
+
+        bool skipChecks = state->GetUserLevel() > 0;
+        if(!skipChecks)
+        {
+            if(isHidden)
+            {
+                LOG_WARNING(libcomp::String("Entity %1 is currently hidden"
+                    " and cannot be interacted with by player: %1\n")
+                    .Arg(objDef->GetID())
+                    .Arg(state->GetAccountUID().ToString()));
+            }
+            else
+            {
+                auto cState = state->GetCharacterState();
+                cState->RefreshCurrentPosition(ChannelServer::GetServerTime());
+                if(cState->GetDistance(objState->GetCurrentX(),
+                    objState->GetCurrentY()) > MAX_INTERACT_DISTANCE)
+                {
+                    LOG_WARNING(libcomp::String("Entity %1 is too far from"
+                        " player character to interact with: %1\n")
+                        .Arg(objDef->GetID())
+                        .Arg(state->GetAccountUID().ToString()));
+                }
+                else
+                {
+                    valid = true;
+                }
+            }
+        }
+        else
+        {
+            valid = true;
+        }
+    }
+    else
+    {
+        LOG_WARNING(libcomp::String("Unknown entity %1\n").Arg(
+            entityID));
+    }
+
+    if(valid)
+    {
+        LOG_DEBUG(libcomp::String("Interacted with entity %1\n").Arg(entityID));
+
         // Get the action list.
         auto pActionList = new ActionList;
-        pActionList->actions = entity->GetActions();
+        pActionList->actions = objDef->GetActions();
         pActionList->sourceEntityID = entityID;
 
         LOG_DEBUG(libcomp::String("Got entity with %1 actions.\n").Arg(
@@ -114,11 +182,6 @@ bool Parsers::ObjectInteraction::Parse(libcomp::ManagerPacket *pPacketManager,
 
             delete pActionListWork;
         }, server, client, pActionList);
-    }
-    else
-    {
-        LOG_WARNING(libcomp::String("Unknown entity %1\n").Arg(
-            entityID));
     }
 
     return true;

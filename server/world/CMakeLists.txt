@@ -1,6 +1,6 @@
 # This file is part of COMP_hack.
 #
-# Copyright (C) 2010-2016 COMP_hack Team <compomega@tutanota.com>
+# Copyright (C) 2010-2017 COMP_hack Team <compomega@tutanota.com>
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -29,10 +29,13 @@ GENERATE_DOCS(doc/Doxyfile.in)
 FILE(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/objgen)
 
 SET(${PROJECT_NAME}_SRCS
+    ${CMAKE_SOURCE_DIR}/libcomp/libcomp/src/WindowsServiceMain.cpp
+
     src/AccountManager.cpp
     src/CharacterManager.cpp
     src/ManagerConnection.cpp
     src/WorldServer.cpp
+    src/WorldSyncManager.cpp
     src/main.cpp
 )
 
@@ -41,6 +44,7 @@ SET(${PROJECT_NAME}_HDRS
     src/CharacterManager.h
     src/ManagerConnection.h
     src/WorldServer.h
+    src/WorldSyncManager.h
 )
 
 SET(${PROJECT_NAME}_SCHEMA
@@ -58,7 +62,7 @@ OBJGEN_XML(${PROJECT_NAME}_STRUCTS
 
     # Include paths
     schema
-    ../../libcomp/schema
+    ../../libcomp/libcomp/schema
 
     # Output files
     WorldConfig.h
@@ -73,11 +77,18 @@ SET(${PROJECT_NAME}_PACKETS
     src/packets/AccountLogin.cpp               # 0x1004
     src/packets/AccountLogout.cpp              # 0x1005
     src/packets/Relay.cpp                      # 0x1006
-    src/packets/CharacterLogin.cpp             # 0x1007
-    src/packets/FriendsUpdate.cpp              # 0x1008
-    src/packets/PartyUpdate.cpp                # 0x1009
-    src/packets/ClanUpdate.cpp                 # 0x100A
+    src/packets/DataSync.cpp                   # 0x1007
+    src/packets/CharacterLogin.cpp             # 0x1008
+    src/packets/FriendsUpdate.cpp              # 0x1009
+    src/packets/PartyUpdate.cpp                # 0x100A
+    src/packets/ClanUpdate.cpp                 # 0x100B
+    src/packets/WebGame.cpp                    # 0x100C
+    src/packets/TeamUpdate.cpp                 # 0x100D
 )
+
+IF(SINGLE_SOURCE_PACKETS)
+    COMBINE_PACKETS(${PROJECT_NAME}_PACKETS)
+ENDIF(SINGLE_SOURCE_PACKETS)
 
 COVERALLS_SOURCES(
     ${${PROJECT_NAME}_SRCS}
@@ -97,9 +108,18 @@ TARGET_INCLUDE_DIRECTORIES(${PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
-TARGET_LINK_LIBRARIES(${PROJECT_NAME} ${CMAKE_THREAD_LIBS_INIT} comp tinyxml2
-    civetweb-cxx civetweb)
+TARGET_LINK_LIBRARIES(${PROJECT_NAME} ${CMAKE_THREAD_LIBS_INIT} config comp
+    tinyxml2 civetweb-cxx civetweb)
+
+IF(USE_COTIRE)
+    cotire(${PROJECT_NAME})
+ENDIF(USE_COTIRE)
 
 UPX_WRAP(${PROJECT_NAME})
 
-INSTALL(TARGETS ${PROJECT_NAME} DESTINATION ${COMP_INSTALL_DIR})
+INSTALL(TARGETS ${PROJECT_NAME} DESTINATION ${COMP_INSTALL_DIR} COMPONENT world)
+
+# Include the PDB file if on Windows
+IF(WIN32)
+    INSTALL(FILES $<TARGET_PDB_FILE:${PROJECT_NAME}> DESTINATION ${COMP_INSTALL_DIR} COMPONENT world)
+ENDIF(WIN32)

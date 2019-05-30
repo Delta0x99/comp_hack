@@ -8,7 +8,7 @@
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -60,15 +60,17 @@ void SendHotbarData(const std::shared_ptr<ChannelClientConnection> client,
     for(size_t i = 0; i < 16; i++)
     {
         auto type = hotbar != nullptr ? hotbar->GetItemTypes(i) : (int8_t)0;
-        auto item = hotbar != nullptr ? hotbar->GetItems(i).Get() : nullptr;
+        auto itemUID = hotbar != nullptr ? hotbar->GetItems(i) : NULLUUID;
         auto itemID = (int64_t)(hotbar != nullptr ? hotbar->GetItemIDs(i) : 0);
 
-        if(nullptr != item)
+        if(!itemUID.IsNull())
         {
-            itemID = state->GetObjectID(item->GetUUID());
+            itemID = state->GetObjectID(itemUID);
         }
 
-        reply.WriteS8(itemID != 0 ? type : 0);
+        // Only clear the type value if a UID item fails to load (0 is a valid
+        // itemID for non-UID types)
+        reply.WriteS8(itemUID.IsNull() || itemID > 0 ? type : 0);
         reply.WriteS64(itemID);
     }
 

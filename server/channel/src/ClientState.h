@@ -8,7 +8,7 @@
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -29,6 +29,8 @@
 
 // channel Includes
 #include "ActiveEntityState.h"
+#include "CharacterState.h"
+#include "DemonState.h"
 
 // objects Includes
 #include <Character.h>
@@ -41,13 +43,19 @@ namespace libcomp
 class Packet;
 }
 
+namespace objects
+{
+class ClientCostAdjustment;
+}
+
 namespace channel
 {
 
+class BazaarState;
+class Zone;
+
 typedef float ClientTime;
 typedef uint64_t ServerTime;
-typedef ActiveEntityStateImp<objects::Character> CharacterState;
-typedef ActiveEntityStateImp<objects::Demon> DemonState;
 
 /**
  * Contains the state of a game client currently connected to the
@@ -91,12 +99,40 @@ public:
      * Get the entity state associated to an entity ID for this client.
      * @param entityID Entity ID associated to this client to retrieve
      * @param readyOnly Optional parameter to only return entities
-     *  currently active, defaults to true
+     *  currently set, defaults to false
      * @return Pointer to the matching entity state, null if no match
      *  exists
      */
     std::shared_ptr<ActiveEntityState> GetEntityState(int32_t entityID,
         bool readyOnly = true);
+
+    /**
+     * Get the bazaar associated to the client account's open market if
+     * one exists and the client is currently in the same zone as the bazaar.
+     * @return Pointer to the matching bazaar state, null if no match
+     *  exists
+     */
+    std::shared_ptr<BazaarState> GetBazaarState();
+
+    /**
+     * Check if the state has a current event associated to it. Auto-only
+     * events do not apply here
+     * @return true if an event exists, false if one does not
+     */
+    bool HasActiveEvent() const;
+
+    /**
+     * Get the source entity ID of the state's current event if it exists
+     * @return Entity ID or 0 if not applicable
+     */
+    int32_t GetEventSourceEntityID() const;
+
+    /**
+     * Get the shop ID of the state's current event if it is an
+     * "open menu" type
+     * @return Shop ID or 0 if not applicable
+     */
+    int32_t GetCurrentMenuShopID() const;
 
     /**
      * Registers the client state with the static entity map for access by
@@ -141,10 +177,12 @@ public:
      * Set the object ID associated a UUID associated to the client.
      * @param uuid UUID to set the corresponding object ID for
      * @param objectID Object ID to map to the UUID
-     * @return true if the UUID was not already registered, false
-     *  if it was
+     * @param allowReset Optional parameter to allow the UUID to be
+     *  cleared and registered again if it already exists
+     * @return true if the UUID was registered, false if it was not
      */
-    bool SetObjectID(const libobjgen::UUID& uuid, int64_t objectID);
+    bool SetObjectID(const libobjgen::UUID& uuid, int64_t objectID,
+        bool allowReset = false);
 
     /**
      * Get the UID of the account associated to the client.
@@ -153,11 +191,23 @@ public:
     const libobjgen::UUID GetAccountUID() const;
 
     /**
+     * Get the user level of the account associated to the client.
+     * @return User level of the account associated to the client
+     */
+    int32_t GetUserLevel() const;
+
+    /**
      * Get the current world CID associated to the logged in
      * character.
      * @return Current character's world CID
      */
     int32_t GetWorldCID() const;
+
+    /**
+     * Get the character's current zone.
+     * @return Current character's zone
+     */
+    std::shared_ptr<Zone> GetZone() const;
 
     /**
      * Get the current party ID associated to the logged in
@@ -172,6 +222,13 @@ public:
      * @return Current character's clan ID
      */
     int32_t GetClanID() const;
+
+    /**
+     * Get the current team ID associated to the logged in
+     * character.
+     * @return Current character's team ID
+     */
+    int32_t GetTeamID() const;
 
     /**
      * Get a current party character representation from the
@@ -205,13 +262,6 @@ public:
     void GetPartyDemonPacket(libcomp::Packet& p) const;
 
     /**
-     * Handle any actions needed when the game client pings the
-     * server with a sync request.  If the start time has not been
-     * set, it will be set here.
-     */
-    void SyncReceived();
-
-    /**
      * Convert time relative to the server to time relative to the
      * game client.
      * @param time Time relative to the server
@@ -238,6 +288,26 @@ public:
      */
     static ClientState* GetEntityClientState(int32_t id,
         bool worldID = false);
+
+    /**
+     * Set a client entity's cost adjustments and return the newly modified
+     * values. If a cost adjustment was removed, a default cost will adjustment
+     * will be generated and returned.
+     * @param entityID Entity ID associated to the client
+     * @param adjustments List of cost adjustments
+     * @return List of adjustments that are now applied to the entity
+     */
+    std::list<std::shared_ptr<objects::ClientCostAdjustment>>
+        SetCostAdjustments(int32_t entityID, std::list<
+        std::shared_ptr<objects::ClientCostAdjustment>> adjustments);
+
+    /**
+     * Get a client entity's current cost adjustments
+     * @param entityID Entity ID associated to the client
+     * @return List of adjustments that are currently applied to the entity
+     */
+    std::list<std::shared_ptr<objects::ClientCostAdjustment>>
+        GetCostAdjustments(int32_t entityID);
 
 private:
     /// Static registry of all client states sorted as world (true) or
@@ -269,8 +339,12 @@ private:
     /// The IDs listed here are only relevant to this client
     std::unordered_map<int32_t, libobjgen::UUID> mLocalObjectUUIDs;
 
-    /// Current time of the server set upon starting the client
-    /// communication.
+    /// Map of client entity IDs to cost adjustments
+    std::unordered_map<int32_t, std::list<
+        std::shared_ptr<objects::ClientCostAdjustment>>> mCostAdjustments;
+
+    /// Current time of the server set upon creating the client
+    /// state.
     ServerTime mStartTime;
 
     /// Next available local object ID

@@ -8,7 +8,7 @@
  *
  * This file is part of the Lobby Server (lobby).
  *
- * Copyright (C) 2012-2017 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -27,16 +27,37 @@
 #include "ApiHandler.h"
 
 // libcomp Includes
+#include <AccountManager.h>
 #include <BaseServer.h>
 #include <CString.h>
 #include <DatabaseConfigMariaDB.h>
 #include <DatabaseConfigSQLite3.h>
 #include <Decrypt.h>
+#include <ErrorCodes.h>
 #include <Log.h>
+#include <PacketCodes.h>
+#include <ScriptEngine.h>
+
+// object Includes
+#include <Character.h>
+#include <CharacterProgress.h>
+#include <Promo.h>
+#include <WebGameSession.h>
+
+// lobby Includes
+#include "LobbySyncManager.h"
+#include "ManagerConnection.h"
+#include "World.h"
 
 using namespace lobby;
 
 #define MAX_PAYLOAD (4096)
+
+#ifdef _WIN32
+    // Disable "decorated name length exceeded" warning for
+    // JsonBox::Object binding
+    #pragma warning(disable : 4503)
+#endif
 
 void ApiSession::Reset()
 {
@@ -47,17 +68,55 @@ void ApiSession::Reset()
 
 ApiHandler::ApiHandler(const std::shared_ptr<objects::LobbyConfig>& config,
     const std::shared_ptr<lobby::LobbyServer>& server) : mConfig(config),
-    mServer(server)
+    mServer(server), mAccountManager(nullptr)
 {
     mParsers["/auth/get_challenge"] = &ApiHandler::Auth_Token;
     mParsers["/account/get_cp"] = &ApiHandler::Account_GetCP;
     mParsers["/account/get_details"] = &ApiHandler::Account_GetDetails;
     mParsers["/account/change_password"] = &ApiHandler::Account_ChangePassword;
+    mParsers["/account/client_login"] = &ApiHandler::Account_ClientLogin;
     mParsers["/account/register"] = &ApiHandler::Account_Register;
     mParsers["/admin/get_accounts"] = &ApiHandler::Admin_GetAccounts;
     mParsers["/admin/get_account"] = &ApiHandler::Admin_GetAccount;
     mParsers["/admin/delete_account"] = &ApiHandler::Admin_DeleteAccount;
     mParsers["/admin/update_account"] = &ApiHandler::Admin_UpdateAccount;
+    mParsers["/admin/get_promos"] = &ApiHandler::Admin_GetPromos;
+    mParsers["/admin/create_promo"] = &ApiHandler::Admin_CreatePromo;
+    mParsers["/admin/delete_promo"] = &ApiHandler::Admin_DeletePromo;
+    mParsers["/webgame/get_coins"] = &ApiHandler::WebGame_GetCoins;
+    mParsers["/webgame/start"] = &ApiHandler::WebGame_Start;
+    mParsers["/webgame/update"] = &ApiHandler::WebGame_Update;
+
+    LOG_DEBUG("Loading web games...\n");
+
+    auto serverDataManager =  new libcomp::ServerDataManager;
+
+    bool gamesLoaded = false;
+    for(auto serverScript : serverDataManager->LoadScripts(server
+        ->GetDataStore(), "/webgames", gamesLoaded, false))
+    {
+        if(serverScript->Type.ToLower() == "webgame")
+        {
+            mGameDefinitions[serverScript->Name.ToLower()] = serverScript;
+        }
+    }
+
+    if(!gamesLoaded)
+    {
+        LOG_ERROR(libcomp::String("API handler failed after loading %1"
+            " web game(s)\n").Arg(mGameDefinitions.size()));
+    }
+    else if(mGameDefinitions.size() == 0)
+    {
+        LOG_DEBUG("No web games found\n");
+    }
+    else
+    {
+        LOG_DEBUG(libcomp::String("API handler successfully loaded %1"
+            " web game(s)\n").Arg(mGameDefinitions.size()));
+    }
+
+    delete serverDataManager;
 }
 
 ApiHandler::~ApiHandler()
@@ -79,15 +138,6 @@ bool ApiHandler::Auth_Token(const JsonBox::Object& request,
 
     libcomp::String username = it->second.getString();
     username = username.ToLower();
-
-    // Make sure the username did not change.
-    if(!session->username.IsEmpty() && session->username != username)
-    {
-        LOG_ERROR(libcomp::String("Session username has change from "
-            "'%1' to '%2'.\n").Arg(session->username).Arg(username));
-
-        session->Reset();
-    }
 
     // Grab a new database connection.
     auto db = GetDatabase();
@@ -167,8 +217,6 @@ bool ApiHandler::Account_GetDetails(const JsonBox::Object& request,
     response["ticket_count"] = (int)account->GetTicketCount();
     response["user_level"] = (int)account->GetUserLevel();
     response["enabled"] = account->GetEnabled();
-    response["gm"] = account->GetIsGM();
-    response["banned"] = account->GetIsBanned();
     response["last_login"] = (int)account->GetLastLogin();
 
     int count = 0;
@@ -248,6 +296,80 @@ bool ApiHandler::Account_ChangePassword(const JsonBox::Object& request,
     else
     {
         response["error"] = "Failed to update password.";
+    }
+
+    return true;
+}
+
+bool ApiHandler::Account_ClientLogin(const JsonBox::Object& request,
+    JsonBox::Object& response, const std::shared_ptr<ApiSession>& session)
+{
+    libcomp::String password;
+
+    auto db = GetDatabase();
+
+    // Find the account for the given username.
+    auto account = objects::Account::LoadAccountByUsername(
+        db, session->username);
+
+    if(!account)
+    {
+        response["error"] = ErrorCodeString(
+            ErrorCodes_t::BAD_USERNAME_PASSWORD).ToUtf8();
+        response["error_code"] = to_underlying(
+            ErrorCodes_t::BAD_USERNAME_PASSWORD);
+
+        return true;
+    }
+
+    auto it = request.find("client_version");
+
+    if(it == request.end())
+    {
+        response["error"] = ErrorCodeString(
+            ErrorCodes_t::WRONG_CLIENT_VERSION).ToUtf8();
+        response["error_code"] = to_underlying(
+            ErrorCodes_t::WRONG_CLIENT_VERSION);
+
+        return true;
+    }
+
+    // Check the account manager.
+    if(!mAccountManager)
+    {
+        response["error"] = ErrorCodeString(
+            ErrorCodes_t::SYSTEM_ERROR).ToUtf8();
+        response["error_code"] = to_underlying(
+            ErrorCodes_t::SYSTEM_ERROR);
+
+        return true;
+    }
+
+    libcomp::String sid1;
+
+    // This session ID is never used. If you notice it being used file a bug.
+    static const libcomp::String sid2 = "deadc0dedeadc0dedeadc0dedeadc0de"
+        "deadc0dedeadc0dedeadc0dedeadc0dedeadc0dedeadc0dedeadc0dedeadc0de"
+        "deadc0dedeadc0dedeadc0dedeadc0dedeadc0dedeadc0dedeadc0dedeadc0de"
+        "deadc0dedeadc0dedeadc0dedeadc0dedeadc0dedeadc0dedeadc0dedeadc0de"
+        "deadc0dedeadc0dedeadc0dedeadc0dedeadc0dedeadc0dedeadc0dedeadc0de"
+        "deadc0dedead";
+
+    // Grab the client version as a string.
+    libcomp::String clientVersion = it->second.getString();
+
+    // Attempt to login for the user.
+    ErrorCodes_t error = mAccountManager->WebAuthLoginApi(
+        session->username, (uint32_t)(clientVersion.ToDecimal<float>() *
+            1000.0f + 0.5f), sid1);
+
+    response["error"] = ErrorCodeString(error).ToUtf8();
+    response["error_code"] = to_underlying(error);
+
+    if(ErrorCodes_t::SUCCESS == error)
+    {
+        response["sid1"] = sid1.ToUtf8();
+        response["sid2"] = sid1.ToUtf8();
     }
 
     return true;
@@ -333,7 +455,6 @@ bool ApiHandler::Account_Register(const JsonBox::Object& request,
     uint8_t ticketCount = mConfig->GetRegistrationTicketCount();
     int32_t userLevel = mConfig->GetRegistrationUserLevel();
     bool enabled = mConfig->GetRegistrationAccountEnabled();
-    bool isGM = mConfig->GetRegistrationIsGM();
 
     // Hash the password for database storage.
     password = libcomp::Decrypt::HashPassword(password, salt);
@@ -343,7 +464,6 @@ bool ApiHandler::Account_Register(const JsonBox::Object& request,
     account->SetEmail(email);
     account->SetPassword(password);
     account->SetSalt(salt);
-    account->SetIsGM(isGM);
     account->SetCP(cp);
     account->SetTicketCount(ticketCount);
     account->SetUserLevel(userLevel);
@@ -384,8 +504,6 @@ bool ApiHandler::Admin_GetAccounts(const JsonBox::Object& request,
         obj["ticket_count"] = (int)account->GetTicketCount();
         obj["user_level"] = (int)account->GetUserLevel();
         obj["enabled"] = account->GetEnabled();
-        obj["gm"] = account->GetIsGM();
-        obj["banned"] = account->GetIsBanned();
         obj["last_login"] = (int)account->GetLastLogin();
 
         int count = 0;
@@ -450,8 +568,6 @@ bool ApiHandler::Admin_GetAccount(const JsonBox::Object& request,
     response["ticket_count"] = (int)account->GetTicketCount();
     response["user_level"] = (int)account->GetUserLevel();
     response["enabled"] = account->GetEnabled();
-    response["gm"] = account->GetIsGM();
-    response["banned"] = account->GetIsBanned();
     response["last_login"] = (int)account->GetLastLogin();
 
     int count = 0;
@@ -568,13 +684,6 @@ bool ApiHandler::Admin_UpdateAccount(const JsonBox::Object& request,
         account->SetDisplayName(it->second.getString());
     }
 
-    it = request.find("gm");
-
-    if(it != request.end())
-    {
-        account->SetIsGM(it->second.getBoolean());
-    }
-
     it = request.find("cp");
 
     if(it != request.end())
@@ -643,13 +752,6 @@ bool ApiHandler::Admin_UpdateAccount(const JsonBox::Object& request,
         account->SetEnabled(it->second.getBoolean());
     }
 
-    it = request.find("banned");
-
-    if(it != request.end())
-    {
-        account->SetIsBanned(it->second.getBoolean());
-    }
-
     bool didUpdate = account->Update(db);
 
     if(session->username == username)
@@ -668,6 +770,566 @@ bool ApiHandler::Admin_UpdateAccount(const JsonBox::Object& request,
     }
 
     return true;
+}
+
+bool ApiHandler::Admin_GetPromos(const JsonBox::Object& request,
+    JsonBox::Object& response, const std::shared_ptr<ApiSession>& session)
+{
+    (void)request;
+    (void)session;
+
+    auto promos = libcomp::PersistentObject::LoadAll<objects::Promo>(
+        GetDatabase());
+
+    JsonBox::Array promoObjects;
+
+    for(auto promo : promos)
+    {
+        JsonBox::Object obj;
+        JsonBox::Array items;
+
+        obj["code"] = promo->GetCode().ToUtf8();
+        obj["startTime"] = (int)promo->GetStartTime();
+        obj["endTime"] = (int)promo->GetEndTime();
+        obj["useLimit"] = (int)promo->GetUseLimit();
+
+        switch(promo->GetLimitType())
+        {
+            case objects::Promo::LimitType_t::PER_CHARACTER:
+                obj["limitType"] = "character";
+                break;
+            case objects::Promo::LimitType_t::PER_WORLD:
+                obj["limitType"] = "world";
+                break;
+            default:
+                obj["limitType"] = "account";
+                break;
+        }
+
+        for(auto item : promo->GetPostItems())
+        {
+            JsonBox::Value val;
+            val = (int)item;
+
+            items.push_back(val);
+        }
+
+        obj["items"] = items;
+
+        promoObjects.push_back(obj);
+    }
+
+    response["promos"] = promoObjects;
+
+    return true;
+}
+
+bool ApiHandler::Admin_CreatePromo(const JsonBox::Object& request,
+    JsonBox::Object& response, const std::shared_ptr<ApiSession>& session)
+{
+    (void)session;
+
+    libcomp::String code;
+    libcomp::String limitType;
+    int32_t startTime = 0;
+    int32_t endTime = 0;
+    int32_t useLimit = 0;
+    objects::Promo::LimitType_t limitEnum;
+    JsonBox::Array items;
+
+    auto it = request.find("code");
+
+    if(it != request.end())
+    {
+        code = it->second.getString();
+    }
+
+    if(code.IsEmpty())
+    {
+        response["error"] = "Invalid promo code.";
+
+        return true;
+    }
+
+    it = request.find("startTime");
+
+    if(it != request.end())
+    {
+        startTime = it->second.getInteger();
+    }
+
+    it = request.find("endTime");
+
+    if(it != request.end())
+    {
+        endTime = it->second.getInteger();
+    }
+
+    if(0 == startTime || 0 == endTime || endTime < startTime)
+    {
+        response["error"] = "Invalid start or end timestamp.";
+
+        return true;
+    }
+
+    it = request.find("useLimit");
+
+    if(it != request.end())
+    {
+        useLimit = it->second.getInteger();
+    }
+
+    if(0 > useLimit || 255 < useLimit)
+    {
+        response["error"] = "Invalid use limit.";
+
+        return true;
+    }
+
+    it = request.find("limitType");
+
+    if(it != request.end())
+    {
+        limitType = it->second.getString();
+    }
+
+    if("character" == limitType)
+    {
+        limitEnum = objects::Promo::LimitType_t::PER_CHARACTER;
+    }
+    else if("world" == limitType)
+    {
+        limitEnum = objects::Promo::LimitType_t::PER_WORLD;
+    }
+    else if("account" == limitType)
+    {
+        limitEnum = objects::Promo::LimitType_t::PER_ACCOUNT;
+    }
+    else
+    {
+        response["error"] = "Invalid limit type.";
+
+        return true;
+    }
+
+    it = request.find("items");
+
+    if(it != request.end())
+    {
+        items = it->second.getArray();
+    }
+
+    if(items.empty())
+    {
+        response["error"] = "Promo has no item.";
+
+        return true;
+    }
+
+    for(auto item : items)
+    {
+        int32_t productID = item.getInteger();
+
+        /// @todo Check the shop product ID is valid.
+
+        if(0 == productID)
+        {
+            response["error"] = "Invalid item.";
+
+            return true;
+        }
+    }
+
+    // Check if the promo code exists.
+    auto promos = objects::Promo::LoadPromoListByCode(GetDatabase(), code);
+
+    if(!promos.empty())
+    {
+        response["error"] = "Promotion with that code already exists. "
+            "Another will be made.";
+    }
+    else
+    {
+        response["error"] = "Success";
+    }
+
+    std::shared_ptr<objects::Promo> promo(new objects::Promo);
+    promo->SetCode(code);
+    promo->SetStartTime((uint32_t)startTime);
+    promo->SetEndTime((uint32_t)endTime);
+    promo->SetUseLimit((uint8_t)useLimit);
+    promo->SetLimitType(limitEnum);
+
+    for(auto item : items)
+    {
+        promo->AppendPostItems((uint32_t)item.getInteger());
+    }
+
+    promo->Register(std::dynamic_pointer_cast<
+        libcomp::PersistentObject>(promo));
+
+    if(!promo->Insert(GetDatabase()))
+    {
+        response["error"] = "Failed to create promotion.";
+    }
+
+    return true;
+}
+
+bool ApiHandler::Admin_DeletePromo(const JsonBox::Object& request,
+    JsonBox::Object& response, const std::shared_ptr<ApiSession>& session)
+{
+    (void)session;
+
+    libcomp::String code;
+    int promoCount = 0;
+
+    auto it = request.find("code");
+
+    if(it != request.end())
+    {
+        code = it->second.getString();
+    }
+
+    if(code.IsEmpty())
+    {
+        response["error"] = "Invalid promo code.";
+
+        return true;
+    }
+
+    // Get the list of promos with that code.
+    auto promos = objects::Promo::LoadPromoListByCode(GetDatabase(), code);
+    auto db = GetDatabase();
+
+    for(auto promo : promos)
+    {
+        if(!promo->Delete(db))
+        {
+            response["error"] = "Failed to delete promo.";
+
+            return true;
+        }
+
+        promoCount++;
+    }
+
+    response["error"] = libcomp::String(
+        "Deleted %1 promotions.").Arg(promoCount).ToUtf8();
+
+    return true;
+}
+
+bool ApiHandler::WebGame_GetCoins(const JsonBox::Object& request,
+    JsonBox::Object& response,
+    const std::shared_ptr<ApiSession>& session)
+{
+    (void)request;
+
+    std::shared_ptr<objects::WebGameSession> gameSession;
+    std::shared_ptr<World> world;
+    if(!GetWebGameSession(response, session, gameSession, world))
+    {
+        return true;
+    }
+
+    int64_t coins = WebGameScript_GetCoins(session);
+    if(coins == -1)
+    {
+        response["error"] = "Failed to get coins";
+        return true;
+    }
+
+    response["error"] = "Success";
+    response["coins"] = libcomp::String("%1").Arg(coins).C();
+
+    return true;
+}
+
+bool ApiHandler::WebGame_Start(const JsonBox::Object& request,
+    JsonBox::Object& response,
+    const std::shared_ptr<ApiSession>& session)
+{
+    std::shared_ptr<objects::WebGameSession> gameSession;
+    std::shared_ptr<World> world;
+    if(!GetWebGameSession(response, session, gameSession, world))
+    {
+        return true;
+    }
+
+    auto webGameSession = std::dynamic_pointer_cast<WebGameApiSession>(
+        session);
+    if(webGameSession->gameState)
+    {
+        response["error"] = "Game has already been started";
+        return true;
+    }
+
+    auto it = request.find("type");
+    if(it == request.end())
+    {
+        response["error"] = "Game type was not specified";
+        return true;
+    }
+
+    libcomp::String type(it->second.getString());
+
+    auto gameIter = mGameDefinitions.find(type);
+    if(gameIter == mGameDefinitions.end())
+    {
+        response["error"] = "Specified game type is not valid";
+        return true;
+    }
+
+    webGameSession->gameState = std::make_shared<libcomp::ScriptEngine>();
+    webGameSession->gameState->Using<objects::Character>();
+
+    // Bind the handler and the JSON response structure and session as well
+    // but nothing on them since we only need to pass through to the API
+    // functions
+    {
+        auto vm = webGameSession->gameState->GetVM();
+
+        Sqrat::Class<ApiSession,
+            Sqrat::NoConstructor<ApiSession>> sBinding(vm, "ApiSession");
+        Sqrat::RootTable(vm).Bind("ApiSession", sBinding);
+
+        Sqrat::Class<JsonBox::Object,
+            Sqrat::NoConstructor<JsonBox::Object>> oBinding(vm, "JsonObject");
+        Sqrat::RootTable(vm).Bind("JsonObject", oBinding);
+
+        Sqrat::Class<ApiHandler,
+            Sqrat::NoConstructor<ApiHandler>> apiBinding(vm, "ApiHandler");
+        apiBinding
+            .Func("GetCoins", &ApiHandler::WebGameScript_GetCoins)
+            .Func("SetResponse", &ApiHandler::WebGameScript_SetResponse)
+            .Func("UpdateCoins", &ApiHandler::WebGameScript_UpdateCoins);
+        Sqrat::RootTable(vm).Bind("ApiHandler", apiBinding);
+    }
+
+    if(!webGameSession->gameState->Eval(gameIter->second->Source))
+    {
+        response["error"] = "Game could not be started";
+        return true;
+    }
+
+    auto worldDB = world->GetWorldDatabase();
+
+    auto character = gameSession->GetCharacter().Get(worldDB, true);
+    auto progress = character
+        ? character->GetProgress().Get(worldDB, true) : nullptr;
+    if(!character || !progress)
+    {
+        response["error"] = "Character information could not be retrieved";
+        return true;
+    }
+
+    // Call the start function first then write standard response values
+    auto vm = webGameSession->gameState->GetVM();
+    Sqrat::Function f(Sqrat::RootTable(vm), "start");
+    if(!f.IsNull())
+    {
+        auto result = !f.IsNull() ? f.Evaluate<int>(this, character,
+            progress->GetCoins(), &response) : 0;
+        if(!result || (*result != 0))
+        {
+            response["error"] = "Unknown error encountered while starting"
+                " game";
+            return true;
+        }
+
+        if(response.find("error") == response.end())
+        {
+            response["error"] = "Success";
+        }
+    }
+
+    response["name"] = character->GetName().C();
+    response["coins"] = libcomp::String("%1").Arg(progress->GetCoins()).C();
+
+    return true;
+}
+
+bool ApiHandler::WebGame_Update(const JsonBox::Object& request,
+    JsonBox::Object& response,
+    const std::shared_ptr<ApiSession>& session)
+{
+    std::shared_ptr<objects::WebGameSession> gameSession;
+    std::shared_ptr<World> world;
+    if(!GetWebGameSession(response, session, gameSession, world))
+    {
+        return true;
+    }
+
+    auto webGameSession = std::dynamic_pointer_cast<WebGameApiSession>(
+        session);
+    if(!webGameSession->gameState)
+    {
+        response["error"] = "Game not started";
+        return true;
+    }
+
+    auto it = request.find("action");
+    if(it == request.end())
+    {
+        response["error"] = "No action specified";
+        return true;
+    }
+
+    libcomp::String action(it->second.getString());
+
+    auto vm = webGameSession->gameState->GetVM();
+    Sqrat::Function f(Sqrat::RootTable(vm), action.C());
+    if(!f.IsNull())
+    {
+        Sqrat::Table sqTable(vm);
+        for(auto& rPair : request)
+        {
+            // Forward everything but the system params
+            if(rPair.first != "action" && rPair.first != "sessionid" &&
+                rPair.first != "username")
+            {
+                libcomp::String val;
+                if(rPair.second.isInteger())
+                {
+                    val = libcomp::String("%1").Arg(rPair.second.getInteger());
+                }
+                else
+                {
+                    val = libcomp::String(rPair.second.getString());
+                }
+
+                sqTable.SetValue<libcomp::String>(rPair.first.c_str(),
+                    val);
+            }
+        }
+
+        // Tables work fine as input parameters but seem to be read-only
+        // so bind the response directly and write to it with a utility
+        // function
+        auto result = !f.IsNull() ? f.Evaluate<int>(this, session, sqTable,
+            &response) : 0;
+        if(!result || (*result != 0))
+        {
+            response["error"] = "Unknown error encountered";
+            return true;
+        }
+
+        if(response.find("error") == response.end())
+        {
+            response["error"] = "Success";
+        }
+    }
+    else
+    {
+        response["error"] = "Invalid action attempted";
+        return true;
+    }
+
+    return true;
+}
+
+int64_t ApiHandler::WebGameScript_GetCoins(const std::shared_ptr<
+    ApiSession>& session)
+{
+    auto wgSession = std::dynamic_pointer_cast<WebGameApiSession>(session);
+    auto gameSession = wgSession ? wgSession->webGameSession : nullptr;
+    if(!gameSession)
+    {
+        return -1;
+    }
+
+    auto world = mServer->GetManagerConnection()->GetWorldByID(
+        gameSession->GetWorldID());
+    if(!world)
+    {
+        return -1;
+    }
+
+    auto worldDB = world->GetWorldDatabase();
+
+    auto character = gameSession->GetCharacter().Get(worldDB);
+    auto progress = character
+        ? character->GetProgress().Get(worldDB) : nullptr;
+    if(progress)
+    {
+        return progress->GetCoins();
+    }
+
+    return -1;
+}
+
+void ApiHandler::WebGameScript_SetResponse(JsonBox::Object* response,
+    const libcomp::String& key, const libcomp::String& value)
+{
+    if(response)
+    {
+        (*response)[key.C()] = value.C();
+    }
+}
+
+bool ApiHandler::WebGameScript_UpdateCoins(
+    const std::shared_ptr<ApiSession>& session, int64_t coins, bool adjust)
+{
+    auto wgSession = std::dynamic_pointer_cast<WebGameApiSession>(session);
+    auto gameSession = wgSession ? wgSession->webGameSession : nullptr;
+    if(!gameSession)
+    {
+        return false;
+    }
+
+    auto world = mServer->GetManagerConnection()->GetWorldByID(
+        gameSession->GetWorldID());
+    if(!world)
+    {
+        return false;
+    }
+
+    auto worldDB = world->GetWorldDatabase();
+
+    auto character = gameSession->GetCharacter().Get(worldDB);
+    auto progress = character
+        ? character->GetProgress().Get(worldDB) : nullptr;
+
+    bool failure = !character || !progress;
+    if(!failure)
+    {
+        int64_t amount = progress->GetCoins();
+        int64_t newAmount = adjust ? amount + coins : coins;
+        if(newAmount < 0)
+        {
+            newAmount = 0;
+        }
+
+        bool success = false;
+        if(amount == newAmount)
+        {
+            success = true;
+        }
+        else
+        {
+            auto changes = std::make_shared<libcomp::DBOperationalChangeSet>();
+            auto expl = std::make_shared<libcomp::DBExplicitUpdate>(progress);
+            expl->SetFrom<int64_t>("Coins", newAmount, progress->GetCoins());
+            changes->AddOperation(expl);
+            success = worldDB->ProcessChangeSet(changes);
+        }
+
+        if(success)
+        {
+            gameSession->SetCoins(newAmount);
+
+            // Sync with the world
+            mServer->GetLobbySyncManager()->UpdateRecord(progress,
+                "CharacterProgress");
+        }
+        else
+        {
+            failure = true;
+        }
+    }
+
+    return !failure;
 }
 
 bool ApiHandler::Authenticate(const JsonBox::Object& request,
@@ -806,30 +1468,85 @@ bool ApiHandler::handlePost(CivetServer *pServer,
 
     libcomp::String clientAddress(pRequestInfo->remote_addr);
 
+    bool webGame = method.Left(9) == "/webgame/";
+
+    bool authorized = false;
+
     std::shared_ptr<ApiSession> session;
-
+    if(webGame)
     {
-        auto it = mSessions.find(clientAddress);
+        // Username and session ID must be included in all web-game requests
+        auto it = obj.find("username");
 
-        if(it != mSessions.end())
+        libcomp::String username = it != obj.end()
+            ? libcomp::String(it->second.getString()).ToLower() : "";
+
+        it = obj.find("sessionid");
+
+        libcomp::String sessionID = it != obj.end()
+            ? it->second.getString() : "";
+
+        auto accountManager = mServer ? mServer->GetAccountManager() : nullptr;
+        session = accountManager ? accountManager->GetWebGameApiSession(
+            username, sessionID, clientAddress) : nullptr;
+        if(session)
         {
-            session = it->second;
+            authorized = true;
         }
-        else
-        {
-            session = std::make_shared<ApiSession>();
-            session->clientAddress = clientAddress;
+    }
+    else
+    {
+        auto usernameIterator = obj.find("session_username");
 
-            mSessions[clientAddress] = session;
+        if("/auth/get_challenge" == method || "/account/register" == method)
+        {
+            usernameIterator = obj.find("username");
+        }
+
+        libcomp::String session_username = usernameIterator != obj.end()
+            ? libcomp::String(usernameIterator->second.getString()).ToLower() : "";
+
+        if(!session_username.IsEmpty())
+        {
+            // Normal API sessions are stored per username
+            auto sessionIterator = mSessions.find(session_username);
+
+            if(sessionIterator != mSessions.end())
+            {
+                session = sessionIterator->second;
+            }
+            else
+            {
+                session = std::make_shared<ApiSession>();
+                session->clientAddress = clientAddress;
+
+                mSessions[session_username] = session;
+            }
+
+            if("/auth/get_challenge" == method || "/account/register" == method ||
+                (Authenticate(obj, response, session) && session->account))
+            {
+                if("/admin/" != method.Left(strlen("/admin/")) ||
+                    session->account->GetUserLevel() >= 1000)
+                {
+                    authorized = true;
+                }
+            }
         }
     }
 
-    if(("/auth/get_challenge" != method &&
-        "/account/register" != method &&
-        !Authenticate(obj, response, session)) ||
-        ("/admin/" == method.Left(strlen("/admin/")) && (!session->account ||
-        !session->account->GetIsGM())))
+    if(!authorized)
     {
+        if(session && session->account)
+        {
+            LOG_ERROR(libcomp::String("Account '%1' is not authorized.\n").Arg(
+                session->account->GetUsername()));
+        }
+        else
+        {
+            LOG_ERROR("Account is not authorized.\n");
+        }
+
         mg_printf(pConnection, "HTTP/1.1 401 Unauthorized\r\n"
             "Connection: close\r\n\r\n");
 
@@ -866,3 +1583,32 @@ bool ApiHandler::handlePost(CivetServer *pServer,
 
     return true;
 }
+
+void ApiHandler::SetAccountManager(AccountManager *pManager)
+{
+    mAccountManager = pManager;
+}
+
+bool ApiHandler::GetWebGameSession(JsonBox::Object& response,
+    const std::shared_ptr<ApiSession>& session, std::shared_ptr<
+    objects::WebGameSession>& gameSession, std::shared_ptr<World>& world)
+{
+    auto wgSession = std::dynamic_pointer_cast<WebGameApiSession>(session);
+    gameSession = wgSession ? wgSession->webGameSession : nullptr;
+    if(!gameSession)
+    {
+        response["error"] = "Invalid session";
+        return false;
+    }
+
+    world = mServer->GetManagerConnection()->GetWorldByID(
+        gameSession->GetWorldID());
+    if(!world)
+    {
+        response["error"] = "World connection down";
+        return false;
+    }
+
+    return true;
+}
+

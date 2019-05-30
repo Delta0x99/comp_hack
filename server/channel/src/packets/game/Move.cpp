@@ -8,7 +8,7 @@
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -38,10 +38,16 @@
 // Standard C++11 Includes
 #include <math.h>
 
+// object Includes
+#include <CalculatedEntityState.h>
+#include <WorldSharedConfig.h>
+
 // channel Includes
 #include "ChannelClientConnection.h"
 #include "ChannelServer.h"
 #include "ClientState.h"
+#include "TokuseiManager.h"
+#include "ZoneManager.h"
 
 using namespace channel;
 
@@ -49,7 +55,6 @@ bool Parsers::Move::Parse(libcomp::ManagerPacket *pPacketManager,
     const std::shared_ptr<libcomp::TcpConnection>& connection,
     libcomp::ReadOnlyPacket& p) const
 {
-    auto server = std::dynamic_pointer_cast<ChannelServer>(pPacketManager->GetServer());
     auto client = std::dynamic_pointer_cast<ChannelClientConnection>(connection);
     auto state = client->GetClientState();
 
@@ -58,15 +63,27 @@ bool Parsers::Move::Parse(libcomp::ManagerPacket *pPacketManager,
     auto eState = state->GetEntityState(entityID, false);
     if(nullptr == eState)
     {
-        LOG_ERROR(libcomp::String("Invalid entity ID received from a move request: %1\n")
-            .Arg(entityID));
-        return false;
+        LOG_ERROR(libcomp::String("Invalid entity ID received from a move"
+            " request: %1\n").Arg(state->GetAccountUID().ToString()));
+        client->Close();
+        return true;
     }
-    else if(!eState->Ready())
+    else if(!eState->Ready(true))
     {
         // Nothing to do, the entity is not currently active
         return true;
     }
+
+    auto zone = eState->GetZone();
+    if(!zone)
+    {
+        // Not actually in a zone
+        return true;
+    }
+
+    auto server = std::dynamic_pointer_cast<ChannelServer>(pPacketManager
+        ->GetServer());
+    auto zoneManager = server->GetZoneManager();
 
     float destX = p.ReadFloat();
     float destY = p.ReadFloat();
@@ -79,31 +96,58 @@ bool Parsers::Move::Parse(libcomp::ManagerPacket *pPacketManager,
     ServerTime startTime = state->ToServerTime(start);
     ServerTime stopTime = state->ToServerTime(stop);
 
-    (void)ratePerSec;
-
-    /// @todo: Determine if the player's movement was valid (collisions, triggers etc)
     bool positionCorrected = false;
-    bool stopped = false;
+
+    const static bool moveCorrection = server->GetWorldSharedConfig()
+        ->GetMoveCorrection();
 
     eState->ExpireStatusTimes(ChannelServer::GetServerTime());
-    if(!eState->CanMove())
+    if(!eState->CanMove() || state->GetLockMovement())
     {
-        stopped = positionCorrected = true;
-        destX = originX;
-        destY = originY;
+        // Don't trust anything the client sent, just stop them at the previous
+        // destination and let them take the hit for start/stop time
+        destX = originX = eState->GetDestinationX();
+        destY = originY = eState->GetDestinationY();
+        positionCorrected = true;
     }
+    else if(moveCorrection)
+    {
+        Point src(originX, originY);
+        Point dest(destX, destY);
 
-    /*float deltaX = destX - originX;
-    float deltaY = destY - originY;
-    float dist2 = (deltaX * deltaX) + (deltaY * deltaY);
+        uint8_t result = zoneManager->CorrectClientPosition(eState, src, dest,
+            startTime, stopTime, true);
+        if(result)
+        {
+            switch(result)
+            {
+            case 1:
+                LOG_DEBUG(libcomp::String("Player movement rolled-back in"
+                    " zone %1: %2\n").Arg(zone->GetDefinitionID())
+                    .Arg(state->GetAccountUID().ToString()));
+                break;
+            case 2:
+                LOG_DEBUG(libcomp::String("Player movement corrected in"
+                    " zone %1: %2 ([%3, %4] => [%5, %6] to [%7, %8])\n")
+                    .Arg(zone->GetDefinitionID())
+                    .Arg(state->GetAccountUID().ToString())
+                    .Arg(src.x).Arg(src.y).Arg(destX).Arg(destY)
+                    .Arg(dest.x).Arg(dest.y));
+                break;
+            default:
+                break;
+            }
 
-    // Delta time in seconds
-    double deltaTime = static_cast<double>((double)(stopTime - startTime) / 1000000.0);
-    double maxDist = static_cast<double>(deltaTime * ratePerSec);
-    double dist = (double)sqrtl(dist2);
+            destX = dest.x;
+            destY = dest.y;
+            positionCorrected = true;
+        }
 
-    LOG_DEBUG(libcomp::String("Rate: %1 | Dist: %2 | Max Dist: %3 | Time: %4\n").Arg(
-        ratePerSec).Arg(dist).Arg(maxDist).Arg(std::to_string(deltaTime)));*/
+        // Origin may be changed for other players even if it was not
+        // functionally changed for the source player
+        originX = src.x;
+        originY = src.y;
+    }
 
     eState->SetOriginX(originX);
     eState->SetCurrentX(originX);
@@ -114,8 +158,9 @@ bool Parsers::Move::Parse(libcomp::ManagerPacket *pPacketManager,
     eState->SetDestinationY(destY);
     eState->SetDestinationTicks(stopTime);
 
+    // Calculate rotation from origin and destination
     float originRot = eState->GetCurrentRotation();
-    float destRot = (float)atan2(originY - destY, originX - destX);
+    float destRot = (float)atan2(destY - originY, destX - originX);
     eState->SetOriginRotation(originRot);
     eState->SetDestinationRotation(destRot);
 
@@ -123,35 +168,80 @@ bool Parsers::Move::Parse(libcomp::ManagerPacket *pPacketManager,
     // and kind of irrelavent so mark it right away
     eState->SetCurrentRotation(destRot);
 
-    /// @todo: Fire zone triggers
-
-    std::list<std::shared_ptr<ChannelClientConnection>> zoneConnections;
-    if(stopped)
+    if(positionCorrected)
     {
-        zoneConnections.push_back(client);
-    }
-    else
-    {
-        zoneConnections = server->GetZoneManager()->GetZoneConnections(client,
-            positionCorrected);
+        // Sending the move response back to the player can still be
+        // forced through, warp back to the corrected point
+        zoneManager->Warp(client, eState, destX, destY, destRot);
     }
 
-    if(zoneConnections.size() > 0)
+    // If the entity is still visible to others, relay info
+    if(eState->IsClientVisible())
     {
-        libcomp::Packet reply;
-        reply.WritePacketCode(ChannelToClientPacketCode_t::PACKET_MOVE);
-        reply.WriteS32Little(entityID);
-        reply.WriteFloat(destX);
-        reply.WriteFloat(destY);
-        reply.WriteFloat(originX);
-        reply.WriteFloat(originY);
-        reply.WriteFloat(ratePerSec);
+        auto zConnections = zoneManager->GetZoneConnections(client, false);
+        if(zConnections.size() > 0)
+        {
+            libcomp::Packet notify;
+            notify.WritePacketCode(ChannelToClientPacketCode_t::PACKET_MOVE);
+            notify.WriteS32Little(entityID);
+            notify.WriteFloat(destX);
+            notify.WriteFloat(destY);
+            notify.WriteFloat(originX);
+            notify.WriteFloat(originY);
+            notify.WriteFloat(ratePerSec);
 
-        std::unordered_map<uint32_t, uint64_t> timeMap;
-        timeMap[reply.Size()] = startTime;
-        timeMap[reply.Size() + 4] = stopTime;
+            RelativeTimeMap timeMap;
+            timeMap[notify.Size()] = startTime;
+            timeMap[notify.Size() + 4] = stopTime;
 
-        ChannelClientConnection::SendRelativeTimePacket(zoneConnections, reply, timeMap);
+            ChannelClientConnection::SendRelativeTimePacket(zConnections,
+                notify, timeMap);
+        }
+    }
+
+    float demonX = destX;
+    float demonY = destY;
+    switch(eState->GetEntityType())
+    {
+    case EntityType_t::CHARACTER:
+        // Update movement decay durability
+        if(eState->GetCalculatedState()->ExistingTokuseiAspectsContains(
+            (int8_t)TokuseiAspectType::EQUIP_MOVE_DECAY))
+        {
+            float dSquared = (float)(std::pow((originX - destX), 2)
+                + std::pow((originY - destY), 2));
+            server->GetTokuseiManager()->UpdateMovementDecay(client,
+                std::sqrt(dSquared));
+        }
+
+        if(state->GetDemonState()->Ready())
+        {
+            // Only compare character/demon distance if its summoned
+            demonX = state->GetDemonState()->GetDestinationX();
+            demonY = state->GetDemonState()->GetDestinationY();
+        }
+        break;
+    case EntityType_t::PARTNER_DEMON:
+        // If a demon is moving while the character is hidden, warp the
+        // character to the destination spot
+        if(state->GetCharacterState()->GetIsHidden())
+        {
+            zoneManager->Warp(client, state->GetCharacterState(),
+                destX, destY, 0.f);
+        }
+        break;
+    default:
+        break;
+    }
+
+    // Player character and demon being at least 6000 units from one another
+    // (squared here), will cause the demon to warp to the character
+    if(state->GetCharacterState()->GetDistance(demonX, demonY, true) >=
+        36000000.f)
+    {
+        zoneManager->Warp(client, state->GetDemonState(),
+            state->GetCharacterState()->GetDestinationX(),
+            state->GetCharacterState()->GetDestinationY(), 0.f);
     }
 
     return true;

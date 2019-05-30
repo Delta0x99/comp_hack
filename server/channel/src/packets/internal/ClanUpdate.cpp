@@ -9,7 +9,7 @@
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -44,6 +44,11 @@
 
 // channel Includes
 #include "ChannelServer.h"
+#include "CharacterManager.h"
+#include "ManagerConnection.h"
+#include "SkillManager.h"
+#include "TokuseiManager.h"
+#include "ZoneManager.h"
 
 using namespace channel;
 
@@ -82,7 +87,6 @@ bool Parsers::ClanUpdate::Parse(libcomp::ManagerPacket *pPacketManager,
             auto state = client->GetClientState();
             auto cState = state->GetCharacterState();
             auto character = cState->GetEntity();
-            auto activatedAbility = cState->GetActivatedAbility();
 
             int32_t clanID = p.ReadS32Little();
             state->GetAccountLogin()->GetCharacterLogin()
@@ -104,27 +108,18 @@ bool Parsers::ClanUpdate::Parse(libcomp::ManagerPacket *pPacketManager,
 
             // Execute or cancel the skill
             int8_t activationID = p.ReadS8();
-            if(activatedAbility && activationID == activatedAbility->GetActivationID())
+            auto activatedAbility = cState->GetSpecialActivations(activationID);
+
+            if(activatedAbility)
             {
                 if(errorCode == 0)
                 {
-                    // Remove the item if its still there (too late if its not :P)
-                    auto item = std::dynamic_pointer_cast<objects::Item>(
-                        libcomp::PersistentObject::GetObjectByUUID(
-                        state->GetObjectUUID(activatedAbility->GetTargetObjectID())));
-
-                    std::unordered_map<uint32_t, uint32_t> itemMap;
-                    itemMap[item ? item->GetType() : 0] = 1;
-
-                    server->GetCharacterManager()->AddRemoveItems(client, itemMap, false,
-                        activatedAbility->GetTargetObjectID());
-
                     server->GetSkillManager()->ExecuteSkill(cState,
-                        (uint8_t)activationID, activatedAbility->GetTargetObjectID());
+                        activationID, activatedAbility->GetActivationObjectID());
                 }
                 else
                 {
-                    server->GetSkillManager()->CancelSkill(cState, (uint8_t)activationID);
+                    server->GetSkillManager()->CancelSkill(cState, activationID);
                 }
             }
         }
@@ -182,7 +177,7 @@ bool Parsers::ClanUpdate::Parse(libcomp::ManagerPacket *pPacketManager,
                     character->SetClan(clan);
                     worldDB->QueueUpdate(character);
 
-                    characterManager->RecalculateStats(client, cState->GetEntityID());
+                    characterManager->RecalculateTokuseiAndStats(cState, client);
                 }
             }
 
@@ -245,7 +240,7 @@ bool Parsers::ClanUpdate::Parse(libcomp::ManagerPacket *pPacketManager,
 
                     if(!clanUpdated)
                     {
-                        characterManager->RecalculateStats(client, cState->GetEntityID());
+                        characterManager->RecalculateTokuseiAndStats(cState, client);
                     }
                 }
             }

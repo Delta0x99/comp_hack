@@ -8,7 +8,7 @@
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -27,6 +27,7 @@
 #include "Packets.h"
 
 // libcomp Includes
+#include <Log.h>
 #include <ManagerPacket.h>
 #include <Packet.h>
 #include <PacketCodes.h>
@@ -35,11 +36,13 @@
 #include <Account.h>
 #include <Character.h>
 #include <Item.h>
-#include <TradeSession.h>
+#include <PlayerExchangeSession.h>
 
 // channel Includes
 #include "ChannelServer.h"
+#include "CharacterManager.h"
 #include "ClientState.h"
+#include "ManagerConnection.h"
 
 using namespace channel;
 
@@ -61,7 +64,7 @@ bool Parsers::TradeAddItem::Parse(libcomp::ManagerPacket *pPacketManager,
     auto client = std::dynamic_pointer_cast<ChannelClientConnection>(connection);
     auto state = client->GetClientState();
     auto cState = state->GetCharacterState();
-    auto tradeSession = state->GetTradeSession();
+    auto exchangeSession = state->GetExchangeSession();
 
     auto item = std::dynamic_pointer_cast<objects::Item>(
         libcomp::PersistentObject::GetObjectByUUID(state->GetObjectUUID(itemID)));
@@ -73,12 +76,10 @@ bool Parsers::TradeAddItem::Parse(libcomp::ManagerPacket *pPacketManager,
         cancel = true;
     }
 
-    auto otherCState = std::dynamic_pointer_cast<CharacterState>(
-        state->GetTradeSession()->GetOtherCharacterState());
-    auto otherChar = otherCState != nullptr ? otherCState->GetEntity() : nullptr;
-    auto otherClient = otherChar != nullptr ?
-        server->GetManagerConnection()->GetClientConnection(
-            otherChar->GetAccount()->GetUsername()) : nullptr;
+    auto otherCState = exchangeSession ? std::dynamic_pointer_cast<CharacterState>(
+        exchangeSession->GetOtherCharacterState()) : nullptr;
+    auto otherClient = otherCState ? server->GetManagerConnection()->GetEntityClient(
+        otherCState->GetEntityID(), false) : nullptr;
 
     if(!otherClient)
     {
@@ -88,68 +89,83 @@ bool Parsers::TradeAddItem::Parse(libcomp::ManagerPacket *pPacketManager,
 
     if(cancel)
     {
-        characterManager->EndTrade(client);
+        characterManager->EndExchange(client);
         if(otherClient)
         {
-            characterManager->EndTrade(otherClient);
+            characterManager->EndExchange(otherClient);
         }
 
         return true;
     }
 
-    tradeSession->SetItems((size_t)slot, item);
-
-    auto otherState = otherClient->GetClientState();
-    auto otherObjectID = otherState->GetObjectID(item->GetUUID());
-    if(otherObjectID == 0)
+    bool error = false;
+    if(slot > -1)
     {
-        otherObjectID = server->GetNextObjectID();
-        otherState->SetObjectID(item->GetUUID(), otherObjectID);
+        // Adding, make sure the item is not already there
+        auto items = exchangeSession->GetItems();
+        for(size_t i = 0; i < 30; i++)
+        {
+            if(items[i].Get() == item)
+            {
+                LOG_DEBUG(libcomp::String("Player attempted to add a trade"
+                    " item more than once: %1\n")
+                    .Arg(state->GetAccountUID().ToString()));
+                error = true;
+                break;
+            }
+        }
+
+        if(!error)
+        {
+            exchangeSession->SetItems((size_t)slot, item);
+        }
+    }
+    else
+    {
+        // Removing, drop all found instances
+        auto items = exchangeSession->GetItems();
+        for(size_t i = 0; i < 30; i++)
+        {
+            if(items[i].Get() == item)
+            {
+                items[i].SetUUID(NULLUUID);
+            }
+        }
+
+        exchangeSession->SetItems(items);
     }
 
     libcomp::Packet reply;
     reply.WritePacketCode(ChannelToClientPacketCode_t::PACKET_TRADE_ADD_ITEM);
     reply.WriteS32Little(0);    //Unknown
-    reply.WriteS64Little(itemID);
+    reply.WriteS64Little(error ? -1 : itemID);
     reply.WriteS32Little(slot);
     reply.WriteS32Little(0);    //Unknown, seems to be the same as other packet
 
     client->SendPacket(reply);
 
-    reply.Clear();
-    reply.WritePacketCode(ChannelToClientPacketCode_t::PACKET_TRADE_ADDED_ITEM);
-    reply.WriteS32Little(slot);
-    reply.WriteS64Little(otherObjectID);
-    reply.WriteU32Little(item->GetType());
-    reply.WriteU16Little(item->GetStackSize());
-    reply.WriteU16Little(item->GetDurability());
-    reply.WriteS8(item->GetMaxDurability());
-    reply.WriteS16Little(item->GetTarot());
-    reply.WriteS16Little(item->GetSoul());
-
-    for(auto modSlot : item->GetModSlots())
+    if(!error)
     {
-        reply.WriteU16Little(modSlot);
+        auto otherState = otherClient->GetClientState();
+        auto otherObjectID = otherState->GetObjectID(item->GetUUID());
+        if(otherObjectID <= 0)
+        {
+            otherObjectID = server->GetNextObjectID();
+            otherState->SetObjectID(item->GetUUID(), otherObjectID);
+        }
+
+        libcomp::Packet notify;
+        notify.WritePacketCode(
+            ChannelToClientPacketCode_t::PACKET_TRADE_ADDED_ITEM);
+        notify.WriteS32Little(slot);
+        notify.WriteS64Little(otherObjectID);
+
+        characterManager->GetItemDetailPacketData(notify, item);
+
+        notify.WriteS32Little(0);    // Unknown
+
+        otherClient->SendPacket(notify);
     }
-
-    reply.WriteS32Little(0);    //Unknown
-
-    auto basicEffect = item->GetBasicEffect();
-    reply.WriteU32Little(basicEffect ? basicEffect
-        : static_cast<uint32_t>(-1));
-
-    auto specialEffect = item->GetSpecialEffect();
-    reply.WriteU32Little(specialEffect ? specialEffect
-        : static_cast<uint32_t>(-1));
-
-    for(auto bonus : item->GetFuseBonuses())
-    {
-        reply.WriteS8(bonus);
-    }
-
-    reply.WriteS32Little(0);    //Unknown, seems to be the same as other packet
-
-    otherClient->SendPacket(reply);
 
     return true;
 }

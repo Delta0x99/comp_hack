@@ -18,6 +18,8 @@
 # Enable the ExternalProject CMake module.
 INCLUDE(ExternalProject)
 
+IF(NOT UPDATER_ONLY)
+
 OPTION(GIT_DEPENDENCIES "Download dependencies from Git instead." OFF)
 
 IF(WIN32)
@@ -69,6 +71,8 @@ SET(GSL_INCLUDE_DIRS "${SOURCE_DIR}/include")
 
 FILE(MAKE_DIRECTORY "${GSL_INCLUDE_DIRS}")
 
+ENDIF(NOT UPDATER_ONLY)
+
 IF(EXISTS "${CMAKE_SOURCE_DIR}/deps/zlib.zip")
     SET(ZLIB_URL
         URL "${CMAKE_SOURCE_DIR}/deps/zlib.zip"
@@ -80,8 +84,8 @@ ELSEIF(GIT_DEPENDENCIES)
     )
 ELSE()
     SET(ZLIB_URL
-        URL https://github.com/comphack/zlib/archive/comp_hack-20161214.zip
-        URL_HASH SHA1=d9d21531283e83adb8ca7a18b92fa590fe813689
+        URL https://github.com/comphack/zlib/archive/comp_hack-20180425.zip
+        URL_HASH SHA1=41ef62fec86b9a4408d99c2e7ee1968a5e246e3b
     )
 ENDIF()
 
@@ -130,6 +134,8 @@ ENDIF()
 SET_TARGET_PROPERTIES(zlib PROPERTIES
     INTERFACE_INCLUDE_DIRECTORIES "${ZLIB_INCLUDES}")
 
+IF(NOT UPDATER_ONLY)
+
 IF(EXISTS "${CMAKE_SOURCE_DIR}/deps/openssl.zip")
     SET(OPENSSL_URL
         URL "${CMAKE_SOURCE_DIR}/deps/openssl.zip"
@@ -141,8 +147,8 @@ ELSEIF(GIT_DEPENDENCIES)
     )
 ELSE()
     SET(OPENSSL_URL
-        URL https://github.com/comphack/openssl/archive/comp_hack-20170520.zip
-        URL_HASH SHA1=604d510caef8fb1abe762e11507a003800b0d83f
+        URL https://github.com/comphack/openssl/archive/comp_hack-20180424.zip
+        URL_HASH SHA1=0ac698894a8d9566a8d7982e32869252dc11d18b
     )
 ENDIF()
 
@@ -237,8 +243,8 @@ ELSEIF(GIT_DEPENDENCIES)
     )
 ELSE()
     SET(MARIADB_URL
-        URL https://github.com/comphack/mariadb/archive/comp_hack-20170530.zip
-        URL_HASH SHA1=5412777b4b3b73bb24ecdff0ae80e39759ba26e0
+        URL https://github.com/comphack/mariadb/archive/comp_hack-20181016.zip
+        URL_HASH SHA1=85cba1f2cd41ed44a7d517dcd7bb004e79267353
     )
 ENDIF()
 
@@ -298,8 +304,8 @@ ELSEIF(GIT_DEPENDENCIES)
     )
 ELSE()
     SET(TTVFS_URL
-        URL https://github.com/comphack/ttvfs/archive/comp_hack-20161214.zip
-        URL_HASH SHA1=929de4c4ec33e21b8d97c4582ec62761e1e5d8f7
+        URL https://github.com/comphack/ttvfs/archive/comp_hack-20180424.zip
+        URL_HASH SHA1=c3feca3b35109e9ad4ae61821f62df76a412b87f
     )
 ENDIF()
 
@@ -399,8 +405,8 @@ ELSEIF(GIT_DEPENDENCIES)
     )
 ELSE()
     SET(PHYSFS_URL
-        URL https://github.com/comphack/physfs/archive/comp_hack-20170117.zip
-        URL_HASH SHA1=df642b6c9cdb1e9ca2103f3747025c55fbdb7c02
+        URL https://github.com/comphack/physfs/archive/comp_hack-20180424.zip
+        URL_HASH SHA1=46de8609129749fccd8bbed02b68d6966ebb5e9b
     )
 ENDIF()
 
@@ -447,46 +453,6 @@ ENDIF()
 SET_TARGET_PROPERTIES(physfs PROPERTIES
     INTERFACE_INCLUDE_DIRECTORIES "${PHYSFS_INCLUDE_DIRS}")
 
-IF(EXISTS "${CMAKE_SOURCE_DIR}/deps/sqrat.zip")
-    SET(SQRAT_URL
-        URL "${CMAKE_SOURCE_DIR}/deps/sqrat.zip"
-    )
-ELSEIF(GIT_DEPENDENCIES)
-    SET(SQRAT_URL
-        GIT_REPOSITORY https://github.com/comphack/sqrat.git
-        GIT_TAG comp_hack
-    )
-ELSE()
-    SET(SQRAT_URL
-        URL https://github.com/comphack/sqrat/archive/comp_hack-20170905.zip
-        URL_HASH SHA1=6c4df47021866905632c5000a5359d2927604c4f
-    )
-ENDIF()
-
-ExternalProject_Add(
-    sqrat
-
-    ${SQRAT_URL}
-
-    PREFIX ${CMAKE_CURRENT_BINARY_DIR}/sqrat
-    CMAKE_ARGS ${CMAKE_RELWITHDEBINFO_OPTIONS} -DCMAKE_INSTALL_PREFIX:PATH=<INSTALL_DIR> "-DCMAKE_CXX_FLAGS=-std=c++11 ${SPECIAL_COMPILER_FLAGS}" -DUSE_STATIC_RUNTIME=${USE_STATIC_RUNTIME} -DCMAKE_DEBUG_POSTFIX=d
-
-    # Dump output to a log instead of the screen.
-    LOG_DOWNLOAD ON
-    LOG_CONFIGURE ON
-    LOG_BUILD ON
-    LOG_INSTALL ON
-)
-
-ExternalProject_Get_Property(sqrat INSTALL_DIR)
-
-SET_TARGET_PROPERTIES(sqrat PROPERTIES FOLDER "Dependencies")
-
-SET(SQRAT_INCLUDE_DIRS "${INSTALL_DIR}/include")
-SET(SQRAT_DEFINES "-DSCRAT_USE_CXX11_OPTIMIZATIONS=1")
-
-FILE(MAKE_DIRECTORY "${SQRAT_INCLUDE_DIRS}")
-
 IF(EXISTS "${CMAKE_SOURCE_DIR}/deps/civetweb.zip")
     SET(CIVET_URL
         URL "${CMAKE_SOURCE_DIR}/deps/civetweb.zip"
@@ -498,8 +464,8 @@ ELSEIF(GIT_DEPENDENCIES)
     )
 ELSE()
     SET(CIVET_URL
-        URL https://github.com/comphack/civetweb/archive/comp_hack-20170530.zip
-        URL_HASH SHA1=787e61e255384f74b771f3967f05552df54f21d4
+        URL https://github.com/comphack/civetweb/archive/comp_hack-20180424.zip
+        URL_HASH SHA1=59cd1b9caab9b13bc1be9c7eea30f052edeb5e79
     )
 ENDIF()
 
@@ -580,8 +546,8 @@ ELSEIF(GIT_DEPENDENCIES)
     )
 ELSE()
     SET(SQUIRREL_URL
-        URL https://github.com/comphack/squirrel3/archive/comp_hack-20161214.zip
-        URL_HASH SHA1=f70e9ec5eb6781d95689f69e999ce6142f3e2594
+        URL https://github.com/comphack/squirrel3/archive/comp_hack-20180424.zip
+        URL_HASH SHA1=e93edb4d4d6efdc45afa6f51e36d1971934e676d
     )
 ENDIF()
 
@@ -631,7 +597,7 @@ ELSE()
 ENDIF()
 
 SET_TARGET_PROPERTIES(squirrel PROPERTIES INTERFACE_INCLUDE_DIRECTORIES
-    "${SQUIRREL_INCLUDE_DIRS};${SQRAT_INCLUDE_DIRS}")
+    "${SQUIRREL_INCLUDE_DIRS}")
 
 ADD_LIBRARY(sqstdlib STATIC IMPORTED)
 ADD_DEPENDENCIES(sqstdlib squirrel3)
@@ -647,7 +613,7 @@ ELSE()
 ENDIF()
 
 SET_TARGET_PROPERTIES(sqstdlib PROPERTIES INTERFACE_INCLUDE_DIRECTORIES
-    "${SQUIRREL_INCLUDE_DIRS};${SQRAT_INCLUDE_DIRS}")
+    "${SQUIRREL_INCLUDE_DIRS}")
 
 IF(EXISTS "${CMAKE_SOURCE_DIR}/deps/asio.zip")
     SET(ASIO_URL
@@ -703,8 +669,8 @@ ELSEIF(GIT_DEPENDENCIES)
     )
 ELSE()
     SET(TINYXML2_URL
-        URL https://github.com/comphack/tinyxml2/archive/comp_hack-20161214.zip
-        URL_HASH SHA1=421b3b41bd1928180e4b91f4afc3b84b752ec237
+        URL https://github.com/comphack/tinyxml2/archive/comp_hack-20180424.zip
+        URL_HASH SHA1=c0825970d84f2418ff8704624b020e65d02bc5f3
     )
 ENDIF()
 
@@ -762,8 +728,8 @@ ELSEIF(GIT_DEPENDENCIES)
     )
 ELSE()
     SET(GOOGLETEST_URL
-        URL https://github.com/comphack/googletest/archive/comp_hack-20161214.zip
-        URL_HASH SHA1=e2493c39bb60c380e394ca6a391630376cfdaeac
+        URL https://github.com/comphack/googletest/archive/comp_hack-20180425.zip
+        URL_HASH SHA1=40b8e97ef07d300539bd2a5d6b1c1cfcd92deb7b
     )
 ENDIF()
 
@@ -863,8 +829,8 @@ ELSEIF(GIT_DEPENDENCIES)
     )
 ELSE()
     SET(JSONBOX_URL
-        URL https://github.com/comphack/JsonBox/archive/comp_hack-20170610.zip
-        URL_HASH SHA1=fe461a7e7129c6b256da79fdc1783981f2a9c0b8
+        URL https://github.com/comphack/JsonBox/archive/comp_hack-20180424.zip
+        URL_HASH SHA1=60fce942f5910a6da8db27d4dcb894ea28adea57
     )
 ENDIF()
 
@@ -910,3 +876,5 @@ ENDIF()
 
 SET_TARGET_PROPERTIES(jsonbox PROPERTIES
     INTERFACE_INCLUDE_DIRECTORIES "${JSONBOX_INCLUDE_DIRS}")
+
+ENDIF(NOT UPDATER_ONLY)

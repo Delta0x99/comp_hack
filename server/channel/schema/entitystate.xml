@@ -2,31 +2,79 @@
 <objgen>
     <object name="EntityStateObject" scriptenabled="true" persistent="false">
         <member type="s32" name="EntityID"/>
-        <member type="bool" name="IsActive"/>
         <member type="enum" name="EntityType" underlying="int8_t">
             <value>OBJECT</value>
             <value>NPC</value>
             <value>CHARACTER</value>
             <value>PARTNER_DEMON</value>
             <value>ENEMY</value>
+            <value>ALLY</value>
+            <value>BAZAAR</value>
             <value>LOOT_BOX</value>
+            <value>PLASMA</value>
+            <value>CULTURE_MACHINE</value>
+            <value>PVP_BASE</value>
+            <value>DIASPORA_BASE</value>
         </member>
 
         <member type="float" name="CurrentX"/>
         <member type="float" name="CurrentY"/>
         <member type="float" name="CurrentRotation"/>
+    </object>
+    <object name="CalculatedEntityState" scriptenabled="true" persistent="false">
+        <member type="array" name="CorrectTbl" size="128">
+            <element type="s16"/>
+        </member>
+        <member type="map" name="NullChances">
+            <key type="s16"/>
+            <value type="s16"/>
+        </member>
+        <member type="map" name="ReflectChances">
+            <key type="s16"/>
+            <value type="s16"/>
+        </member>
+        <member type="map" name="AbsorbChances">
+            <key type="s16"/>
+            <value type="s16"/>
+        </member>
 
-        <member type="list" name="Actions">
-            <element type="Action*"/>
+        <member type="set" name="ActiveTokuseiTriggers">
+            <element type="s8"/>
+        </member>
+        <member type="set" name="ExistingTokuseiAspects">
+            <element type="s8"/>
+        </member>
+        <member type="map" name="EffectiveTokusei">
+            <key type="s32"/>
+            <value type="u16"/>
+        </member>
+        <member type="map" name="PendingSkillTokusei">
+            <key type="s32"/>
+            <value type="u16"/>
         </member>
     </object>
     <object name="ActiveEntityStateObject" baseobject="EntityStateObject"
     scriptenabled="true" persistent="false">
-        <member type="bool" name="IsActive" inherited="true" default="true"/>
+        <member type="bool" name="IsHidden"/>
+        <member type="bool" name="AIIgnored"/>
+        <member type="MiDevilData*" name="DevilData" nulldefault="true"/>
         <member type="enum" name="Faction" underlying="int8_t">
             <value>PLAYER</value>
             <value>ENEMY</value>
         </member>
+        <member type="s32" name="FactionGroup"/>
+        <member type="enum" name="DisplayState" underlying="int8_t">
+            <value>NOT_SET</value>
+            <value>AWAITING_SUMMON</value>
+            <value>DATA_NOT_SENT</value>
+            <value>DATA_SENT</value>
+            <value>UB_SPECTATE</value>
+            <value>ACTIVE</value>
+            <!-- Below states are still active but cannot be interacted with -->
+            <value>MOUNT</value>
+            <value>BIKE_BOOST</value>
+        </member>
+        <member type="s32" name="KillValue"/>
 
         <member type="float" name="OriginX"/>
         <member type="float" name="OriginY"/>
@@ -39,6 +87,7 @@
 
         <member type="float" name="KnockbackResist"/>
         <member type="u64" name="KnockbackTicks"/>
+        <member type="u64" name="DeathTimeOut"/>
 
         <member type="map" name="StatusTimes">
             <key type="u8"/>
@@ -54,16 +103,39 @@
         <member type="s16" name="SPEED"/>
         <member type="s16" name="LUCK"/>
         <member type="s16" name="CLSR"/>
+        <member type="s16" name="CLSRBase"/>
         <member type="s16" name="LNGR"/>
+        <member type="s16" name="LNGRBase"/>
         <member type="s16" name="SPELL"/>
+        <member type="s16" name="SPELLBase"/>
         <member type="s16" name="SUPPORT"/>
+        <member type="s16" name="SUPPORTBase"/>
         <member type="s16" name="PDEF"/>
+        <member type="s16" name="PDEFBase"/>
         <member type="s16" name="MDEF"/>
-        <member type="array" name="CorrectTbl" size="128">
-            <element type="s16"/>
-        </member>
+        <member type="s16" name="MDEFBase"/>
+        <member type="s16" name="CombatRunSpeed"/>
+        <member type="s16" name="SpeedBoost"/>
+        <member type="CalculatedEntityState*" name="CalculatedState"/>
+
         <member type="ActivatedAbility*" name="ActivatedAbility"
             nulldefault="true"/>
+        <member type="map" name="SpecialActivations">
+            <key type="s8"/>
+            <value type="ActivatedAbility*"/>
+        </member>
+        <member type="map" name="SkillCooldowns">
+            <key type="u32"/>
+            <value type="u64"/>
+        </member>
+        <member type="map" name="PendingCombatants">
+            <key type="s32"/>
+            <value type="u64"/>
+        </member>
+        <member type="set" name="AggroIDs">
+            <element type="s32"/>
+        </member>
+        <member type="u64" name="CombatTimeOut"/>
 
         <member type="set" name="CurrentSkills">
             <element type="u32"/>
@@ -71,22 +143,59 @@
         <member type="set" name="AddedSkills">
             <element type="u32"/>
         </member>
+        <member type="set" name="DisabledSkills">
+            <element type="u32"/>
+        </member>
         <member type="set" name="ActiveSwitchSkills">
             <element type="u32"/>
         </member>
+
+        <member type="set" name="StatusRestrictAct">
+            <element type="u32"/>
+        </member>
+        <member type="set" name="StatusRestrictMove">
+            <element type="u32"/>
+        </member>
+        <member type="set" name="StatusRestrictMagic">
+            <element type="u32"/>
+        </member>
+        <member type="set" name="StatusRestrictSpecial">
+            <element type="u32"/>
+        </member>
+        <member type="set" name="StatusRestrictTalk">
+            <element type="u32"/>
+        </member>
+
+        <member type="map" name="AdditionalTokusei">
+            <key type="s32"/>
+            <value type="u16"/>
+        </member>
     </object>
     <object name="ActivatedAbility" scriptenabled="true" persistent="false">
-        <member type="u32" name="SkillID"/>
+        <member type="MiSkillData*" name="SkillData"/>
         <member type="EntityStateObject*" name="SourceEntity"
             nulldefault="true"/>
         <member type="s64" name="ActivationObjectID"/>
         <member type="s64" name="TargetObjectID"/>
+        <member type="u8" name="ActivationTargetType"/>
         <member type="bool" name="EntityTargeted"/>
-        <member type="u8" name="ActivationID"/>
+        <member type="s8" name="ActivationID"/>
         <member type="u64" name="ActivationTime"/>
-        <member type="u64" name="ExecutionTime"/>
         <member type="u64" name="ChargedTime"/>
+        <member type="u64" name="ExecutionRequestTime"/>
+        <member type="u64" name="ExecutionTime"/>
+        <member type="u64" name="HitTime"/>
+        <member type="u64" name="CooldownTime"/>
+        <member type="u64" name="LockOutTime"/>
+        <member type="s16" name="UpkeepCost"/>
         <member type="u8" name="ExecuteCount"/>
+        <member type="u8" name="MaxUseCount"/>
+        <member type="float" name="ChargeMoveSpeed"/>
+        <member type="float" name="ChargeCompleteMoveSpeed"/>
+        <member type="u16" name="ExpertiseBoost"/>
+
+        <member type="bool" name="Cancelled"/>
+        <member type="s8" name="ErrorCode" default="-1"/>
 
         <member type="s32" name="HPCost"/>
         <member type="s32" name="MPCost"/>
@@ -96,5 +205,27 @@
             <key type="u32"/>
             <value type="u32"/>
         </member>
+    </object>
+    <object name="DigitalizeState" scriptenabled="true" persistent="false">
+        <member type="Demon*" name="Demon"/>
+        <member type="u8" name="RaceID"/>
+        <member type="u8" name="StatRate"/>
+        <member type="map" name="CorrectValues">
+            <key type="u8"/>
+            <value type="s16"/>
+        </member>
+        <member type="set" name="ActiveSkills">
+            <element type="u32"/>
+        </member>
+        <member type="set" name="PassiveSkills">
+            <element type="u32"/>
+        </member>
+        <member type="list" name="TokuseiIDs">
+            <element type="s32"/>
+        </member>
+
+        <member type="s32" name="TimeExtension"/>
+        <member type="s32" name="CooldownReduction"/>
+        <member type="bool" name="TimeLimited" default="true"/>
     </object>
 </objgen>

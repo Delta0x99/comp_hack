@@ -8,7 +8,7 @@
  *
  * This file is part of the Lobby Server (lobby).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -39,6 +39,7 @@
 #include <Character.h>
 
 // lobby Includes
+#include "AccountManager.h"
 #include "LobbyClientConnection.h"
 #include "LobbyServer.h"
 #include "ManagerPacket.h"
@@ -55,8 +56,6 @@ bool Parsers::DeleteCharacter::Parse(libcomp::ManagerPacket *pPacketManager,
     }
 
     uint8_t cid = p.ReadU8();
-
-    LOG_DEBUG(libcomp::String("Character ID: %1\n").Arg(cid));
 
     auto server = std::dynamic_pointer_cast<LobbyServer>(pPacketManager->GetServer());
     auto config = std::dynamic_pointer_cast<objects::LobbyConfig>(server->GetConfig());

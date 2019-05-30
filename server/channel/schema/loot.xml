@@ -7,8 +7,9 @@
             <value num="1">EGG</value>
             <value num="2">BOSS_BOX</value>
             <value num="3">TREASURE_BOX</value>
+            <value num="4">PLASMA</value>
         </member>
-        <member type="Enemy*" name="Enemy"/>
+        <member type="EnemyBase*" name="Enemy"/>
         <member type="array" name="Loot" size="12">
             <element type="Loot*" nulldefault="true"/>
         </member>
@@ -20,5 +21,13 @@
     <object name="Loot" persistent="false">
         <member type="u32" name="Type"/>
         <member type="u16" name="Count"/>
+        <member type="s32" name="CooldownRestrict"/>
+    </object>
+    <object name="DestinyBox" scriptenabled="true" persistent="false">
+        <member type="s32" name="OwnerCID"/>
+        <member type="list" name="Loot">
+            <element type="Loot*"/>
+        </member>
+        <member type="u8" name="NextPosition"/>
     </object>
 </objgen>

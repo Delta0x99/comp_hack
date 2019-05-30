@@ -8,7 +8,7 @@
  *
  * This file is part of the World Server (world).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -37,9 +37,14 @@
 #include <ReadOnlyPacket.h>
 #include <TcpConnection.h>
 
+// object Includes
+#include <WorldConfig.h>
+#include <WorldSharedConfig.h>
+
 // world Includes
-#include "WorldConfig.h"
+#include "AccountManager.h"
 #include "WorldServer.h"
+#include "WorldSyncManager.h"
 
 using namespace world;
 
@@ -92,6 +97,27 @@ bool Parsers::GetWorldInfo::Parse(libcomp::ManagerPacket *pPacketManager,
             LOG_CRITICAL("The server failed to register with the lobby's database."
                 " Notifying the lobby of the failure.\n");
         }
+
+        // Initialize the sync manager
+        auto syncManager = server->GetWorldSyncManager();
+
+        const std::set<std::string> lobbyTypes = { "Account" };
+        if(!syncManager->Initialize() ||
+            !syncManager->RegisterConnection(server->GetLobbyConnection(), lobbyTypes))
+        {
+            LOG_CRITICAL("Failed to initialize the sync manager!\n");
+        }
+
+        // Cleanup AccountWorldData and schedule additional runs every hour
+        auto accountManager = server->GetAccountManager();
+        accountManager->CleanupAccountWorldData();
+
+        auto sch = std::chrono::milliseconds(3600000);
+        server->GetTimerManager()->SchedulePeriodicEvent(sch, []
+            (WorldServer* pServer)
+            {
+                pServer->GetAccountManager()->CleanupAccountWorldData();
+            }, server.get());
     }
 
     // Reply with a packet containing the world ID and the database
@@ -111,10 +137,28 @@ bool Parsers::GetWorldInfo::Parse(libcomp::ManagerPacket *pPacketManager,
 
         if(!fromLobby)
         {
-            auto nextChannelID = server->GetNextChannelID();
-            reply.WriteU8(nextChannelID);
+            int8_t reservedID = p.ReadS8();
 
-            bool otherChannelsExist = server->GetChannels().size() > 1;
+            if(reservedID >= 0)
+            {
+                if(server->GetChannelConnectionByID(reservedID))
+                {
+                    LOG_ERROR(libcomp::String("Channel requested reserved ID"
+                        " %1 which has already been given to another server\n")
+                        .Arg(reservedID));
+                    connection->Close();
+                    return true;
+                }
+
+                reply.WriteU8((uint8_t)reservedID);
+            }
+            else
+            {
+                uint8_t nextChannelID = server->GetNextChannelID();
+                reply.WriteU8(nextChannelID);
+            }
+
+            bool otherChannelsExist = server->GetChannels().size() > 0;
             reply.WriteU8(otherChannelsExist ? 1 : 0);
         }
     
@@ -131,6 +175,7 @@ bool Parsers::GetWorldInfo::Parse(libcomp::ManagerPacket *pPacketManager,
         if(!fromLobby)
         {
             server->GetLobbyDatabase()->GetConfig()->SavePacket(reply, false);
+            config->GetWorldSharedConfig()->SavePacket(reply, false);
         }
     }
 

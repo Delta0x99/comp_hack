@@ -8,7 +8,7 @@
  *
  * This file is part of the COMP_hack Tester Library (libtester).
  *
- * Copyright (C) 2012-2017 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -71,6 +71,150 @@ class TestFailure { };
     ASSERT_FALSE(a); \
     _didUpholdConditionRef = true; })(_didUpholdCondition); \
     if(!_didUpholdCondition) { throw libtester::TestFailure(); } }
+
+#define ASSERT_TRUE_OR_RETURN(cond) { \
+    bool res = false; \
+    [&]() { \
+        ASSERT_TRUE(cond); \
+        res = true; \
+    }(); \
+\
+    if(!res) { \
+        return false; \
+    } \
+}
+
+#define ASSERT_TRUE_OR_RETURN_MSG(cond, msg) { \
+    bool res = false; \
+    [&]() { \
+        ASSERT_TRUE(cond) << msg; \
+        res = true; \
+    }(); \
+\
+    if(!res) { \
+        return false; \
+    } \
+}
+
+#define ASSERT_FALSE_OR_RETURN(cond) { \
+    bool res = false; \
+    [&]() { \
+        ASSERT_FALSE(cond); \
+        res = true; \
+    }(); \
+\
+    if(!res) { \
+        return false; \
+    } \
+}
+
+#define ASSERT_FALSE_OR_RETURN_MSG(cond, msg) { \
+    bool res = false; \
+    [&]() { \
+        ASSERT_FALSE(cond) << msg; \
+        res = true; \
+    }(); \
+\
+    if(!res) { \
+        return false; \
+    } \
+}
+
+#define ASSERT_EQ_OR_RETURN(a, b) { \
+    bool res = false; \
+    [&]() { \
+        ASSERT_EQ(a, b); \
+        res = true; \
+    }(); \
+\
+    if(!res) { \
+        return false; \
+    } \
+}
+
+#define ASSERT_EQ_OR_RETURN_MSG(a, b, msg) { \
+    bool res = false; \
+    [&]() { \
+        ASSERT_EQ(a, b) << msg; \
+        res = true; \
+    }(); \
+\
+    if(!res) { \
+        return false; \
+    } \
+}
+
+#define ASSERT_NE_OR_RETURN(a, b) { \
+    bool res = false; \
+    [&]() { \
+        ASSERT_NE(a, b); \
+        res = true; \
+    }(); \
+\
+    if(!res) { \
+        return false; \
+    } \
+}
+
+#define ASSERT_NE_OR_RETURN_MSG(a, b, msg) { \
+    bool res = false; \
+    [&]() { \
+        ASSERT_NE(a, b) << msg; \
+        res = true; \
+    }(); \
+\
+    if(!res) { \
+        return false; \
+    } \
+}
+
+#define ASSERT_GT_OR_RETURN(a, b) { \
+    bool res = false; \
+    [&]() { \
+        ASSERT_GT(a, b); \
+        res = true; \
+    }(); \
+\
+    if(!res) { \
+        return false; \
+    } \
+}
+
+#define ASSERT_GT_OR_RETURN_MSG(a, b, msg) { \
+    bool res = false; \
+    [&]() { \
+        ASSERT_GT(a, b) << msg; \
+        res = true; \
+    }(); \
+\
+    if(!res) { \
+        return false; \
+    } \
+}
+
+#define ASSERT_GE_OR_RETURN(a, b) { \
+    bool res = false; \
+    [&]() { \
+        ASSERT_GE(a, b); \
+        res = true; \
+    }(); \
+\
+    if(!res) { \
+        return false; \
+    } \
+}
+
+#define ASSERT_GE_OR_RETURN_MSG(a, b, msg) { \
+    bool res = false; \
+    [&]() { \
+        ASSERT_GE(a, b) << msg; \
+        res = true; \
+    }(); \
+\
+    if(!res) { \
+        return false; \
+    } \
+}
 
 namespace libtester
 {

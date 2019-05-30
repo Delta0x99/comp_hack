@@ -8,7 +8,7 @@
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -41,6 +41,7 @@
 
 // channel Includes
 #include "ChannelServer.h"
+#include "CharacterManager.h"
 #include "ClientState.h"
 
 using namespace channel;
@@ -63,24 +64,6 @@ bool Parsers::DepoRent::Parse(libcomp::ManagerPacket *pPacketManager,
     int64_t boxID = p.ReadS64Little();
     int64_t itemID = p.ReadS64Little();
 
-    const static std::unordered_map<uint32_t, uint8_t> itemDayMap = {
-        { SVR_CONST.RENTAL_ITEM_1, 1 },
-        { SVR_CONST.RENTAL_ITEM_3, 3 },
-        { SVR_CONST.RENTAL_ITEM_7, 7 },
-        { SVR_CONST.RENTAL_ITEM_30, 30 },
-        { SVR_CONST.RENTAL_ITEM_60, 60 },
-        { SVR_CONST.RENTAL_ITEM_90, 90 }
-    };
-
-    const static std::unordered_map<uint32_t, uint8_t> demonDayMap = {
-        { SVR_CONST.RENTAL_DEMON_1, 1 },
-        { SVR_CONST.RENTAL_DEMON_3, 3 },
-        { SVR_CONST.RENTAL_DEMON_7, 7 },
-        { SVR_CONST.RENTAL_DEMON_30, 30 },
-        { SVR_CONST.RENTAL_DEMON_60, 60 },
-        { SVR_CONST.RENTAL_DEMON_90, 90 }
-    };
-
     bool isItemDepo = false;
     int32_t delta = 0;
     bool success = false;
@@ -93,16 +76,16 @@ bool Parsers::DepoRent::Parse(libcomp::ManagerPacket *pPacketManager,
     }
     else
     {
-        auto itemDayIter = itemDayMap.find(item->GetType());
-        auto demonDayIter = demonDayMap.find(item->GetType());
+        auto itemDayIter = SVR_CONST.DEPO_MAP_ITEM.find(item->GetType());
+        auto demonDayIter = SVR_CONST.DEPO_MAP_DEMON.find(item->GetType());
 
         std::shared_ptr<objects::ItemBox> itemDepo;
         std::shared_ptr<objects::DemonBox> demonDepo;
 
         bool isNew = false;
-        uint8_t dayCount = 0;
+        uint32_t dayCount = 0;
         auto dbChanges = libcomp::DatabaseChangeSet::Create(state->GetAccountUID());
-        isItemDepo = itemDayIter != itemDayMap.end();
+        isItemDepo = itemDayIter != SVR_CONST.DEPO_MAP_ITEM.end();
         if(isItemDepo)
         {
             itemDepo = worldData->GetItemBoxes((size_t)boxID).Get();
@@ -125,7 +108,7 @@ bool Parsers::DepoRent::Parse(libcomp::ManagerPacket *pPacketManager,
 
             success = true;
         }
-        else if(demonDayIter != demonDayMap.end())
+        else if(demonDayIter != SVR_CONST.DEPO_MAP_DEMON.end())
         {
             auto demonBoxID = (int8_t)boxID;
 
@@ -180,13 +163,16 @@ bool Parsers::DepoRent::Parse(libcomp::ManagerPacket *pPacketManager,
             }
 
             // Update the used item's box
-            auto itemBox = item->GetItemBox().Get();
-            itemBox->SetItems((size_t)item->GetBoxSlot(), NULLUUID);
-            dbChanges->Update(itemBox);
+            auto itemBox = std::dynamic_pointer_cast<objects::ItemBox>(
+                libcomp::PersistentObject::GetObjectByUUID(item->GetItemBox()));
+            if(itemBox)
+            {
+                itemBox->SetItems((size_t)item->GetBoxSlot(), NULLUUID);
+                dbChanges->Update(itemBox);
+                server->GetCharacterManager()->SendItemBoxData(client, itemBox,
+                    { (uint16_t)item->GetBoxSlot() });
+            }
             dbChanges->Delete(item);
-
-            std::list<uint16_t> slots = { (uint16_t)item->GetBoxSlot() };
-            server->GetCharacterManager()->SendItemBoxData(client, itemBox, slots);
 
             server->GetWorldDatabase()->QueueChangeSet(dbChanges);
         }

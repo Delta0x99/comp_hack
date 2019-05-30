@@ -8,7 +8,7 @@
  *
  * This file is part of the Lobby Server (lobby).
  *
- * Copyright (C) 2012-2017 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -37,6 +37,7 @@
 // libcomp Includes
 #include <CString.h>
 #include <Database.h>
+#include <ServerDataManager.h>
 
 // libobjgen Includes
 #include <Account.h>
@@ -47,18 +48,40 @@
 // Standard C++11 Includes
 #include <unordered_map>
 
+namespace objects
+{
+class WebGameSession;
+}
+
+namespace libobjects
+{
+class ScriptEngine;
+}
+
 namespace lobby
 {
+
+class AccountManager;
+class World;
 
 class ApiSession
 {
 public:
+    virtual ~ApiSession() { }
+
     void Reset();
 
     libcomp::String username;
     libcomp::String challenge;
     libcomp::String clientAddress;
     std::shared_ptr<objects::Account> account;
+};
+
+class WebGameApiSession : public ApiSession
+{
+public:
+    std::shared_ptr<objects::WebGameSession> webGameSession;
+    std::shared_ptr<libcomp::ScriptEngine> gameState;
 };
 
 class ApiHandler : public CivetHandler
@@ -71,6 +94,8 @@ public:
 
     virtual bool handlePost(CivetServer *pServer,
         struct mg_connection *pConnection);
+
+    void SetAccountManager(AccountManager *pManager);
 
 protected:
     bool Authenticate(const JsonBox::Object& request,
@@ -91,6 +116,9 @@ protected:
     bool Account_ChangePassword(const JsonBox::Object& request,
         JsonBox::Object& response,
         const std::shared_ptr<ApiSession>& session);
+    bool Account_ClientLogin(const JsonBox::Object& request,
+        JsonBox::Object& response,
+        const std::shared_ptr<ApiSession>& session);
     bool Account_Register(const JsonBox::Object& request,
         JsonBox::Object& response,
         const std::shared_ptr<ApiSession>& session);
@@ -107,8 +135,38 @@ protected:
     bool Admin_UpdateAccount(const JsonBox::Object& request,
         JsonBox::Object& response,
         const std::shared_ptr<ApiSession>& session);
+    bool Admin_GetPromos(const JsonBox::Object& request,
+        JsonBox::Object& response,
+        const std::shared_ptr<ApiSession>& session);
+    bool Admin_CreatePromo(const JsonBox::Object& request,
+        JsonBox::Object& response,
+        const std::shared_ptr<ApiSession>& session);
+    bool Admin_DeletePromo(const JsonBox::Object& request,
+        JsonBox::Object& response,
+        const std::shared_ptr<ApiSession>& session);
+
+    bool WebGame_GetCoins(const JsonBox::Object& request,
+        JsonBox::Object& response,
+        const std::shared_ptr<ApiSession>& session);
+    bool WebGame_Start(const JsonBox::Object& request,
+        JsonBox::Object& response,
+        const std::shared_ptr<ApiSession>& session);
+    bool WebGame_Update(const JsonBox::Object& request,
+        JsonBox::Object& response,
+        const std::shared_ptr<ApiSession>& session);
+
+    int64_t WebGameScript_GetCoins(const std::shared_ptr<ApiSession>& session);
+    void WebGameScript_SetResponse(JsonBox::Object* response,
+        const libcomp::String& key, const libcomp::String& value);
+    bool WebGameScript_UpdateCoins(const std::shared_ptr<ApiSession>& session,
+        int64_t coins, bool adjust);
 
 private:
+    bool GetWebGameSession(JsonBox::Object& response,
+        const std::shared_ptr<ApiSession>& session,
+        std::shared_ptr<objects::WebGameSession>& gameSession,
+        std::shared_ptr<World>& world);
+
     // List of API sessions.
     std::unordered_map<libcomp::String, std::shared_ptr<ApiSession>> mSessions;
 
@@ -119,6 +177,11 @@ private:
 
     std::shared_ptr<objects::LobbyConfig> mConfig;
     std::shared_ptr<lobby::LobbyServer> mServer;
+
+    std::unordered_map<libcomp::String,
+        std::shared_ptr<libcomp::ServerScript>> mGameDefinitions;
+
+    AccountManager *mAccountManager;
 };
 
 } // namespace lobby

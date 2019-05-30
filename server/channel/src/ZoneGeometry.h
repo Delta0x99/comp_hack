@@ -9,7 +9,7 @@
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -34,11 +34,14 @@
 // Standard C++11 includes
 #include <array>
 #include <list>
+#include <set>
 #include <unordered_map>
 
 namespace objects
 {
 class MiSpotData;
+class QmpElement;
+class QmpNavPoint;
 }
 
 namespace channel
@@ -156,7 +159,7 @@ public:
      *  intersected by the path
      * @return true if the line collides, false if it does not
      */
-    bool Collides(const Line& path, Point& point,
+    virtual bool Collides(const Line& path, Point& point,
         Line& surface) const;
 
     /// List of all lines that make up the shape.
@@ -168,6 +171,10 @@ public:
     /// true if the shape is one or many line segments with no enclosure
     /// false if the shape is a solid enclosure
     bool IsLine;
+
+    /// true if the shape lines block intersections only from one direction
+    /// false if the lines block intersections from both direction
+    bool OneWay;
 
     /// Represents the top left-most and bottom right most points of the
     /// shape. This is useful in determining if a shape could be collided
@@ -186,14 +193,20 @@ public:
      */
     ZoneQmpShape();
 
+    virtual bool Collides(const Line& path, Point& point,
+        Line& surface) const;
+
     /// ID of the shape generated from a QMP file
     uint32_t ShapeID;
 
     /// Unique instance ID for the same shape ID from a QMP file
     uint32_t InstanceID;
 
-    /// Name of the element representation from a QMP file
-    libcomp::String ElementName;
+    /// Element definition from a QMP file
+    std::shared_ptr<objects::QmpElement> Element;
+
+    /// Determines if the shape has active collision on it
+    bool Active;
 };
 
 /**
@@ -227,10 +240,13 @@ public:
      * @param shape Output parameter to return the first shape the path
      *  will collide with. This will always be the shape the surface
      *  belongs to
+     * @param disabledBarriers Set of element IDs that should not count as
+     *  a collision
      * @return true if the line collides, false if it does not
      */
     bool Collides(const Line& path, Point& point,
-        Line& surface, std::shared_ptr<ZoneShape>& shape) const;
+        Line& surface, std::shared_ptr<ZoneShape>& shape,
+        const std::set<uint32_t> disabledBarriers = {}) const;
 
     /**
      * Determines if the supplied path collides with any shape
@@ -244,7 +260,16 @@ public:
     libcomp::String QmpFilename;
 
     /// List of all shapes
-    std::list<std::shared_ptr<ZoneShape>> Shapes;
+    std::list<std::shared_ptr<ZoneQmpShape>> Shapes;
+
+    /// List of all Qmp elements
+    std::list<std::shared_ptr<objects::QmpElement>> Elements;
+
+    /// List of nav points in zones that use this geometry. In zones that
+    /// contain player zone-in spots, these are filtered to the active play
+    /// area only.
+    std::unordered_map<uint32_t,
+        std::shared_ptr<objects::QmpNavPoint>> NavPoints;
 };
 
 /**

@@ -8,7 +8,7 @@
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -27,6 +27,7 @@
 #include "Packets.h"
 
 // libcomp Includes
+#include <DefinitionManager.h>
 #include <ManagerPacket.h>
 #include <Packet.h>
 #include <PacketCodes.h>
@@ -43,6 +44,8 @@
 
 // channel Includes
 #include "ChannelServer.h"
+#include "CharacterManager.h"
+#include "ZoneManager.h"
 
 using namespace channel;
 
@@ -76,7 +79,8 @@ bool Parsers::LootItem::Parse(libcomp::ManagerPacket *pPacketManager,
     uint32_t demonType = 0;
     std::list<int8_t> lootedSlots;
     std::unordered_map<uint32_t, uint32_t> lootedItems;
-    if(lBox && (lBox->ValidLooterIDsCount() == 0 ||
+    if(lBox && ((lBox->ValidLooterIDsCount() == 0 &&
+        lBox->GetType() != objects::LootBox::Type_t::BOSS_BOX) ||
         lBox->ValidLooterIDsContains(state->GetWorldCID())))
     {
         if(lBox->GetType() == objects::LootBox::Type_t::EGG)
@@ -96,7 +100,7 @@ bool Parsers::LootItem::Parse(libcomp::ManagerPacket *pPacketManager,
             {
                 std::set<int8_t> slots = { 0 };
 
-                auto lootMap = zone->TakeLoot(lState, slots, freeSlots);
+                auto lootMap = zone->TakeLoot(lBox, slots, freeSlots);
                 for(auto lPair : lootMap)
                 {
                     // Should only be one
@@ -152,7 +156,7 @@ bool Parsers::LootItem::Parse(libcomp::ManagerPacket *pPacketManager,
                     slots.insert(slotID);
                 }
 
-                auto lootMap = zone->TakeLoot(lState, slots, freeSlots,
+                auto lootMap = zone->TakeLoot(lBox, slots, freeSlots,
                     stacksFree);
                 for(auto lPair : lootMap)
                 {
@@ -185,7 +189,7 @@ bool Parsers::LootItem::Parse(libcomp::ManagerPacket *pPacketManager,
         for(auto slot : lootedSlots)
         {
             reply.WriteS8(slot);
-            reply.WriteS8(0);   // Unknown
+            reply.WriteS8(0);   // Target box slot, doesn't seem to actually matter
         }
 
         auto zConnections = zone->GetConnectionList();

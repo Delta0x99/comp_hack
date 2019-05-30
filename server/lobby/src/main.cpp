@@ -8,7 +8,7 @@
  *
  * This file is part of the Lobby Server (lobby).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -25,7 +25,10 @@
  */
 
 // lobby Includes
+#include "AccountManager.h"
 #include "ApiHandler.h"
+#include "Config.h"
+#include "ImportHandler.h"
 #include "LoginWebHandler.h"
 #include "LobbyConfig.h"
 #include "LobbyServer.h"
@@ -51,11 +54,7 @@ int main(int argc, const char *argv[])
 
     libcomp::Log::GetSingletonPtr()->AddStandardOutputHook();
 
-    LOG_INFO(libcomp::String("COMP_hack Lobby Server v%1.%2.%3 (%4)\n").Arg(
-        VERSION_MAJOR).Arg(VERSION_MINOR).Arg(VERSION_PATCH).Arg(
-        VERSION_CODENAME));
-    LOG_INFO(libcomp::String("Copyright (C) 2010-%1 COMP_hack Team\n\n").Arg(
-        VERSION_YEAR));
+    libcomp::Config::LogVersion("COMP_hack Lobby Server");
 
     std::string configPath = libcomp::BaseServer::GetDefaultConfigPath() +
         "lobby.xml";
@@ -146,21 +145,40 @@ int main(int argc, const char *argv[])
 
     auto pLoginHandler = new lobby::LoginHandler(server->GetMainDatabase());
     pLoginHandler->SetAccountManager(server->GetAccountManager());
-    pLoginHandler->SetSessionManager(server->GetSessionManager());
     pLoginHandler->SetConfig(std::dynamic_pointer_cast<
         objects::LobbyConfig>(config));
 
     auto pApiHandler = new lobby::ApiHandler(config, server);
+    pApiHandler->SetAccountManager(server->GetAccountManager());
 
-    CivetServer webServer(options);
-    webServer.addHandler("/", pLoginHandler);
-    webServer.addHandler("/api", pApiHandler);
+    auto pImportHandler = new lobby::ImportHandler(config, server);
+
+    CivetServer *pWebServer = nullptr;
+
+    try
+    {
+        pWebServer = new CivetServer(options);
+        pWebServer->addHandler("/", pLoginHandler);
+        pWebServer->addHandler("/api", pApiHandler);
+        pWebServer->addHandler("/import", pImportHandler);
+    }
+    catch(CivetException e)
+    {
+        LOG_CRITICAL(libcomp::String("The lobby API server failed to start "
+            "with the following message: %1\n").Arg(e.what()));
+
+        return EXIT_FAILURE;
+    }
 
     // Set this for the signal handler.
     libcomp::Shutdown::Configure(server.get());
 
     // Start the main server loop (blocks until done).
     int returnCode = server->Start();
+
+    // Shut down the web server.
+    delete pWebServer;
+    pWebServer = nullptr;
 
     // Complete the shutdown process.
     libcomp::Shutdown::Complete();

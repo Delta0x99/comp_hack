@@ -8,7 +8,7 @@
  *
  * This file is part of the Lobby Server (lobby).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -38,6 +38,7 @@
 #include <CharacterLogin.h>
 
 // lobby Includes
+#include "AccountManager.h"
 #include "LobbyServer.h"
 
 using namespace lobby;
@@ -59,16 +60,22 @@ bool Parsers::AccountLogout::Parse(libcomp::ManagerPacket *pPacketManager,
     auto login = accountManager->GetUserLogin(username);
     if(!login)
     {
-        return false;
+        LOG_ERROR(libcomp::String("World requested logout for an account that"
+            " is not currently logged in: '%1'\n").Arg(username));
+        return true;
     }
 
     auto cLogin = login->GetCharacterLogin();
-    int8_t expiration = 0;
     if(channelSwitch)
     {
-        cLogin->SetChannelID(p.ReadS8());
-        login->SetSessionKey(p.ReadU32Little());
-        expiration = 10;
+        int8_t channelID = p.ReadS8();
+        uint32_t sessionKey = p.ReadU32Little();
+
+        if(!accountManager->ChannelToChannelSwitch(username, channelID, sessionKey))
+        {
+            LOG_ERROR(libcomp::String("Failed to set channel to channel switch for"
+                " account: '%1'\n").Arg(username));
+        }
     }
     else
     {
@@ -76,14 +83,8 @@ bool Parsers::AccountLogout::Parse(libcomp::ManagerPacket *pPacketManager,
         if(cLogin->GetWorldID() != -1)
         {
             LOG_DEBUG(libcomp::String("Logging out user: '%1'\n").Arg(username));
-            accountManager->LogoutUser(username, cLogin->GetWorldID());
-            expiration = 60;
+            accountManager->Logout(username);
         }
-    }
-
-    if(expiration)
-    {
-        server->GetSessionManager()->ExpireSession(username, expiration);
     }
 
     return true;

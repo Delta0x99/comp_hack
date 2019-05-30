@@ -8,7 +8,7 @@
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -27,11 +27,13 @@
 #include "Packets.h"
 
 // libcomp Includes
+#include <ManagerPacket.h>
 #include <Packet.h>
 #include <PacketCodes.h>
 
 // channel Includes
-#include "ChannelClientConnection.h"
+#include "ChannelServer.h"
+#include "CharacterManager.h"
 
 using namespace channel;
 
@@ -39,27 +41,15 @@ bool Parsers::MaterialBox::Parse(libcomp::ManagerPacket *pPacketManager,
     const std::shared_ptr<libcomp::TcpConnection>& connection,
     libcomp::ReadOnlyPacket& p) const
 {
-    (void)pPacketManager;
-
     if(p.Size() != 0)
     {
         return false;
     }
 
-    /// @todo: implement non-default values
-    
-    libcomp::Packet reply;
-    reply.WritePacketCode(ChannelToClientPacketCode_t::PACKET_MATERIAL_BOX);
+    auto client = std::dynamic_pointer_cast<ChannelClientConnection>(connection);
+    auto server = std::dynamic_pointer_cast<ChannelServer>(pPacketManager->GetServer());
 
-    int32_t materialCount = 0;
-    reply.WriteS32Little(materialCount);
-    for(int8_t i = 0; i < materialCount; i++)
-    {
-        reply.WriteU32Little(0);    // Material Type
-        reply.WriteS32Little(0);    // Material Amount
-    }
-
-    connection->SendPacket(reply);
+    server->GetCharacterManager()->SendMaterials(client);
 
     return true;
 }

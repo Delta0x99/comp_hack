@@ -11,7 +11,7 @@
  *
  * This file is part of the World Server (world).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -36,10 +36,13 @@
 #include <PacketCodes.h>
 
 // object Includes
+#include <Account.h>
 #include <Character.h>
 #include <CharacterLogin.h>
 
 // world Includes
+#include "AccountManager.h"
+#include "CharacterManager.h"
 #include "WorldServer.h"
 
 using namespace world;
@@ -57,6 +60,7 @@ bool Parsers::Relay::Parse(libcomp::ManagerPacket *pPacketManager,
         connection);
     auto server = std::dynamic_pointer_cast<WorldServer>(pPacketManager->GetServer());
     auto characterManager = server->GetCharacterManager();
+    auto db = server->GetWorldDatabase();
 
     int32_t sourceCID = p.ReadS32Little();
     PacketRelayMode_t mode = (PacketRelayMode_t)p.ReadU8();
@@ -96,13 +100,49 @@ bool Parsers::Relay::Parse(libcomp::ManagerPacket *pPacketManager,
                     }
                     else
                     {
-                        reportFailed.push_back(login->GetCharacter()->GetName());
+                        auto character = login->GetCharacter().Get(db);
+                        if(character)
+                        {
+                            reportFailed.push_back(character->GetName());
+                        }
+                        else
+                        {
+                            LOG_WARNING(libcomp::String("Failed offline relay"
+                                " attempt encountered with non-existent"
+                                " character: %1\n").Arg(login->GetCharacter()
+                                    .GetUUID().ToString()));
+                        }
                     }
                 }
                 else
                 {
                     // CID isn't valid, ignore
                 }
+            }
+        }
+        break;
+    case PacketRelayMode_t::RELAY_ACCOUNT:
+        {
+            reportOffline = true;
+
+            auto accountUIDStr = p.ReadString16Little(
+                libcomp::Convert::Encoding_t::ENCODING_UTF8, true);
+
+            libobjgen::UUID accountUID(accountUIDStr.C());
+            auto account = std::dynamic_pointer_cast<objects::Account>(
+                libcomp::PersistentObject::GetObjectByUUID(accountUID));
+
+            auto login = account ? server->GetAccountManager()->GetUserLogin(
+                account->GetUsername()) : nullptr;
+            auto targetLogin = login ? login->GetCharacterLogin() : nullptr;
+            if(targetLogin)
+            {
+                targetLogins.push_back(targetLogin);
+            }
+            else
+            {
+                // Account either doesn't exist or hasn't logged in, report failure
+                reportFailed.push_back(accountUIDStr);
             }
         }
         break;
@@ -130,14 +170,22 @@ bool Parsers::Relay::Parse(libcomp::ManagerPacket *pPacketManager,
             bool includeSource = p.ReadU8() == 1;
 
             auto party = characterManager->GetParty(partyID);
-            for(auto cid : party->GetMemberIDs())
+            if(party)
             {
-                // Party members
-                auto targetLogin = characterManager->GetCharacterLogin(cid);
-                if(targetLogin && (includeSource || cid != sourceCID))
+                for(auto cid : party->GetMemberIDs())
                 {
-                    targetLogins.push_back(targetLogin);
+                    // Party members
+                    auto targetLogin = characterManager->GetCharacterLogin(cid);
+                    if(targetLogin && (includeSource || cid != sourceCID))
+                    {
+                        targetLogins.push_back(targetLogin);
+                    }
                 }
+            }
+            else
+            {
+                LOG_ERROR(libcomp::String("Attempted to relay a packet for"
+                    " a party that does not exist: %1\n").Arg(partyID));
             }
         }
         break;
@@ -147,19 +195,51 @@ bool Parsers::Relay::Parse(libcomp::ManagerPacket *pPacketManager,
             bool includeSource = p.ReadU8() == 1;
 
             auto clanInfo = characterManager->GetClan(clanID);
-            for(auto mPair : clanInfo->GetMemberMap())
+            if(clanInfo)
             {
-                // Clan members
-                auto targetLogin = characterManager->GetCharacterLogin(mPair.first);
-                if(targetLogin && (includeSource || mPair.first != sourceCID))
+                for(auto mPair : clanInfo->GetMemberMap())
                 {
-                    targetLogins.push_back(targetLogin);
+                    // Clan members
+                    auto targetLogin = characterManager->GetCharacterLogin(
+                        mPair.first);
+                    if(targetLogin &&
+                        (includeSource || mPair.first != sourceCID))
+                    {
+                        targetLogins.push_back(targetLogin);
+                    }
                 }
+            }
+            else
+            {
+                LOG_ERROR(libcomp::String("Attempted to relay a packet for"
+                    " a clan that does not exist: %1\n").Arg(clanID));
             }
         }
         break;
     case PacketRelayMode_t::RELAY_TEAM:
-        /// @todo: implement team relaying
+        {
+            int32_t teamID = p.ReadS32Little();
+            bool includeSource = p.ReadU8() == 1;
+            
+            auto team = characterManager->GetTeam(teamID);
+            if(team)
+            {
+                for(auto cid : team->GetMemberIDs())
+                {
+                    // Team members
+                    auto targetLogin = characterManager->GetCharacterLogin(cid);
+                    if(targetLogin && (includeSource || cid != sourceCID))
+                    {
+                        targetLogins.push_back(targetLogin);
+                    }
+                }
+            }
+            else
+            {
+                LOG_ERROR(libcomp::String("Attempted to relay a packet for"
+                    " a team that does not exist: %1\n").Arg(teamID));
+            }
+        }
         break;
     default:
         LOG_ERROR("Invalid relay mode specified\n");
@@ -181,7 +261,17 @@ bool Parsers::Relay::Parse(libcomp::ManagerPacket *pPacketManager,
             }
             else if(reportOffline)
             {
-                reportFailed.push_back(c->GetCharacter()->GetName());
+                auto character = c->GetCharacter().Get(db);
+                if(character)
+                {
+                    reportFailed.push_back(character->GetName());
+                }
+                else
+                {
+                    LOG_WARNING(libcomp::String("Failed relay attempt"
+                        " encountered with non-existent character: %1\n")
+                        .Arg(c->GetCharacter().GetUUID().ToString()));
+                }
             }
         }
 

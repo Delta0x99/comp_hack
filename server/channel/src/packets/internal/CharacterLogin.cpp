@@ -9,7 +9,7 @@
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -44,6 +44,7 @@
 
 // channel Includes
 #include "ChannelServer.h"
+#include "ManagerConnection.h"
 
 using namespace channel;
 
@@ -107,7 +108,7 @@ bool Parsers::CharacterLogin::Parse(libcomp::ManagerPacket *pPacketManager,
     if(updateFlags & (uint8_t)CharacterLoginStateFlag_t::CHARLOGIN_FRIEND_FLAGS)
     {
         auto fSettings = objects::FriendSettings::LoadFriendSettingsByCharacter(
-            worldDB, login->GetCharacter());
+            worldDB, login->GetCharacter().GetUUID());
         if(!fSettings)
         {
             LOG_ERROR(libcomp::String("Character friend settings failed to load: %1\n")
@@ -123,7 +124,7 @@ bool Parsers::CharacterLogin::Parse(libcomp::ManagerPacket *pPacketManager,
                 ->GetEntity()->GetUUID();
             for(auto f : friends)
             {
-                if(f.GetUUID() == uuid)
+                if(f == uuid)
                 {
                     friendConnections.push_back(client);
                     break;
@@ -182,7 +183,6 @@ bool Parsers::CharacterLogin::Parse(libcomp::ManagerPacket *pPacketManager,
             if(clientChar->GetClan().GetUUID() == character->GetClan().GetUUID())
             {
                 clanConnections.push_back(client);
-                break;
             }
         }
 
@@ -220,6 +220,7 @@ bool Parsers::CharacterLogin::Parse(libcomp::ManagerPacket *pPacketManager,
         int32_t localEntityID = state ? state->GetCharacterState()->GetEntityID() : -1;
         int32_t localDemonEntityID = state ? state->GetDemonState()->GetEntityID() : -1;
 
+        std::shared_ptr<ChannelClientConnection> selfConnection;
         std::list<std::shared_ptr<ChannelClientConnection>> partyConnections;
         std::list<std::shared_ptr<ChannelClientConnection>> sameZoneConnections;
         std::list<std::shared_ptr<ChannelClientConnection>> differentZoneConnections;
@@ -227,7 +228,11 @@ bool Parsers::CharacterLogin::Parse(libcomp::ManagerPacket *pPacketManager,
         {
             auto otherState = client->GetClientState();
             auto otherLogin = otherState->GetAccountLogin()->GetCharacterLogin();
-            if(otherState->GetPartyID() == login->GetPartyID())
+            if(state == otherState)
+            {
+                selfConnection = client;
+            }
+            else if(otherState->GetPartyID() == login->GetPartyID())
             {
                 partyConnections.push_back(client);
                 if(otherLogin->GetZoneID() == zoneID &&
@@ -245,12 +250,19 @@ bool Parsers::CharacterLogin::Parse(libcomp::ManagerPacket *pPacketManager,
         if(updateFlags & (uint8_t)CharacterLoginStateFlag_t::CHARLOGIN_ZONE)
         {
             // Map connections by local entity visibility
-            std::unordered_map<bool, std::list<std::shared_ptr<ChannelClientConnection>>*> cMap;
-            cMap[true] = &sameZoneConnections;
-            cMap[false] = &differentZoneConnections;
+            std::unordered_map<bool, std::list<std::shared_ptr<ChannelClientConnection>>> cMap;
+            cMap[true] = sameZoneConnections;
+            cMap[false] = differentZoneConnections;
+
+            // The zone needs to be relayed back to the player (for some reason)
+            if(selfConnection)
+            {
+                cMap[true].push_back(selfConnection);
+            }
+
             for(auto pair : cMap)
             {
-                if(pair.second->size() == 0) continue;
+                if(pair.second.size() == 0) continue;
 
                 libcomp::Packet packet;
                 packet.WritePacketCode(ChannelToClientPacketCode_t::PACKET_PARTY_MEMBER_ZONE);
@@ -258,7 +270,7 @@ bool Parsers::CharacterLogin::Parse(libcomp::ManagerPacket *pPacketManager,
                 packet.WriteS32Little((int32_t)zoneID);
                 packet.WriteS32Little(login->GetWorldCID());
 
-                ChannelClientConnection::BroadcastPacket(*pair.second, packet);
+                ChannelClientConnection::BroadcastPacket(pair.second, packet);
             }
 
             if(differentZoneConnections.size() > 0)

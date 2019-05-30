@@ -8,7 +8,7 @@
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -26,7 +26,39 @@
 
 #include "EnemyState.h"
 
+// libcomp Includes
+#include <ScriptEngine.h>
+
+// objects Includes
+#include <MiDevilData.h>
+#include <MiNPCBasicData.h>
+
 using namespace channel;
+
+namespace libcomp
+{
+    template<>
+    ScriptEngine& ScriptEngine::Using<EnemyState>()
+    {
+        if(!BindingExists("EnemyState", true))
+        {
+            Using<ActiveEntityState>();
+            Using<objects::Enemy>();
+
+            Sqrat::DerivedClass<EnemyState, ActiveEntityState,
+                Sqrat::NoConstructor<EnemyState>> binding(mVM, "EnemyState");
+            binding
+                .Func<std::shared_ptr<objects::Enemy>
+                (EnemyState::*)() const>(
+                    "GetEntity", &EnemyState::GetEntity)
+                .StaticFunc("Cast", &EnemyState::Cast);
+
+            Bind<EnemyState>("EnemyState", binding);
+        }
+
+        return *this;
+    }
+}
 
 EnemyState::EnemyState()
 {
@@ -49,4 +81,61 @@ void EnemyState::SetTalkPoints(int32_t entityID,
 {
     std::lock_guard<std::mutex> lock(mLock);
     mTalkPoints[entityID] = points;
+}
+
+std::shared_ptr<objects::EnemyBase> EnemyState::GetEnemyBase() const
+{
+    return GetEntity();
+}
+
+uint8_t EnemyState::RecalculateStats(
+    libcomp::DefinitionManager* definitionManager,
+    std::shared_ptr<objects::CalculatedEntityState> calcState)
+{
+    std::lock_guard<std::mutex> lock(mLock);
+
+    auto entity = GetEntity();
+    if(!entity)
+    {
+        return true;
+    }
+
+    return RecalculateEnemyStats(definitionManager, calcState);
+}
+
+std::set<uint32_t> EnemyState::GetAllSkills(
+    libcomp::DefinitionManager* definitionManager, bool includeTokusei)
+{
+    return GetAllEnemySkills(definitionManager, includeTokusei);
+}
+
+uint8_t EnemyState::GetLNCType()
+{
+    int16_t lncPoints = 0;
+
+    auto entity = GetEntity();
+    auto demonData = GetDevilData();
+    if(entity && demonData)
+    {
+        lncPoints = demonData->GetBasic()->GetLNC();
+    }
+
+    return CalculateLNCType(lncPoints);
+}
+
+int8_t EnemyState::GetGender()
+{
+    auto demonData = GetDevilData();
+    if(demonData)
+    {
+        return (int8_t)demonData->GetBasic()->GetGender();
+    }
+
+    return 2;   // None
+}
+
+std::shared_ptr<EnemyState> EnemyState::Cast(
+    const std::shared_ptr<EntityStateObject>& obj)
+{
+    return std::dynamic_pointer_cast<EnemyState>(obj);
 }

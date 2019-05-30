@@ -8,7 +8,7 @@
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2017 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -36,14 +36,18 @@
 #include <ServerZoneSpot.h>
 
 // Standard C++14 Includes
+#include <PushIgnore.h>
 #include <gsl/gsl>
+#include <PopIgnore.h>
 
 // channel Includes
+#include "ActionManager.h"
 #include "ChannelServer.h"
+#include "ZoneManager.h"
 
 using namespace channel;
 
-class ActionList
+class ActionListB
 {
 public:
     std::list<std::shared_ptr<objects::Action>> actions;
@@ -68,18 +72,24 @@ bool Parsers::SpotTriggered::Parse(libcomp::ManagerPacket *pPacketManager,
 
     auto client = std::dynamic_pointer_cast<ChannelClientConnection>(
         connection);
+    auto state = client->GetClientState();
     auto server = std::dynamic_pointer_cast<ChannelServer>(
         pPacketManager->GetServer());
     auto zoneManager = server->GetZoneManager();
-    auto entity = state(connection)->GetCharacterState();
-    auto zone = zoneManager->GetZoneInstance(client);
-    auto zoneDef = zone->GetDefinition();
+    auto entity = state->GetCharacterState();
+    auto zone = zoneManager->GetCurrentZone(client);
+    auto zoneDef = zone ? zone->GetDefinition() : nullptr;
 
     // Ignore spot triggers that are not for the current character and in the
     // correct zone or ones with no dynamic map loaded.
     if(entity->GetEntityID() != static_cast<int32_t>(entityID) ||
-        zoneDef->GetID() != zoneID)
+        !zoneDef || zoneDef->GetID() != zoneID)
     {
+        return true;
+    }
+    else if(state->GetBikeBoosting())
+    {
+        // Bike boosting players should not trigger spots
         return true;
     }
 
@@ -111,15 +121,10 @@ bool Parsers::SpotTriggered::Parse(libcomp::ManagerPacket *pPacketManager,
 
     if(spot)
     {
-        // Fire events if correct trigger action occurred
-        if(entered == spot->GetTriggerOnLeave())
-        {
-            return true;
-        }
-
         // Get the action list.
-        auto pActionList = new ActionList;
-        pActionList->actions = spot->GetActions();
+        auto pActionList = new ActionListB;
+        pActionList->actions = entered
+            ? spot->GetActions() : spot->GetLeaveActions();
 
         LOG_DEBUG(libcomp::String("Got spot with %1 actions.\n").Arg(
             pActionList->actions.size()));
@@ -136,7 +141,7 @@ bool Parsers::SpotTriggered::Parse(libcomp::ManagerPacket *pPacketManager,
         server->QueueWork([](
             const std::shared_ptr<ChannelServer>& serverWork,
             const std::shared_ptr<ChannelClientConnection> clientWork,
-            gsl::owner<ActionList*> pActionListWork)
+            gsl::owner<ActionListB*> pActionListWork)
         {
             serverWork->GetActionManager()->PerformActions(clientWork,
                 pActionListWork->actions, 0);

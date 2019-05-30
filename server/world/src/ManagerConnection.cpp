@@ -8,7 +8,7 @@
  *
  * This file is part of the World Server (world).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -33,7 +33,10 @@
 #include <PacketCodes.h>
 
 // world Includes
+#include "AccountManager.h"
+#include "CharacterManager.h"
 #include "WorldServer.h"
+#include "WorldSyncManager.h"
 
 using namespace world;
 
@@ -143,6 +146,7 @@ void ManagerConnection::RemoveConnection(std::shared_ptr<libcomp::InternalConnec
             {
                 auto accountManager = worldServer->GetAccountManager();
                 auto characterManager = worldServer->GetCharacterManager();
+                auto syncManager = worldServer->GetWorldSyncManager();
                 auto loggedOut = accountManager->LogoutUsersOnChannel(channelID);
 
                 if(loggedOut.size() > 0)
@@ -150,14 +154,24 @@ void ManagerConnection::RemoveConnection(std::shared_ptr<libcomp::InternalConnec
                     LOG_WARNING(libcomp::String("%1 user(s) forcefully logged out"
                         " from channel %2.\n").Arg(loggedOut.size()).Arg(channelID));
 
+                    bool flushSyncData = false;
                     std::list<std::shared_ptr<objects::CharacterLogin>> cLogOuts;
                     for(auto logOut : loggedOut)
                     {
                         auto cLogin = logOut->GetCharacterLogin();
 
-                        characterManager->PartyLeave(cLogin, nullptr, true);
+                        characterManager->PartyLeave(cLogin, nullptr);
+                        characterManager->TeamLeave(cLogin);
+
+                        flushSyncData |= syncManager->CleanUpCharacterLogin(
+                            cLogin->GetWorldCID());
 
                         cLogOuts.push_back(cLogin);
+                    }
+
+                    if(flushSyncData)
+                    {
+                        syncManager->SyncOutgoing();
                     }
 
                     characterManager->SendStatusToRelatedCharacters(cLogOuts,

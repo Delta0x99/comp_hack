@@ -8,7 +8,7 @@
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -42,6 +42,7 @@
 // channel Includes
 #include "AccountManager.h"
 #include "ChannelServer.h"
+#include "ManagerConnection.h"
 
 using namespace channel;
 
@@ -88,13 +89,6 @@ bool Parsers::AccountLogout::Parse(libcomp::ManagerPacket *pPacketManager,
             request.WritePacketCode(
                 ChannelToClientPacketCode_t::PACKET_LOGOUT);
             request.WriteU32Little(
-                (uint32_t)LogoutPacketAction_t::LOGOUT_PREPARE);
-            client->QueuePacket(request);
-
-            request.Clear();
-            request.WritePacketCode(
-                ChannelToClientPacketCode_t::PACKET_LOGOUT);
-            request.WriteU32Little(
                 (uint32_t)LogoutPacketAction_t::LOGOUT_CHANNEL_SWITCH);
             request.WriteU32Little(sessionKey);
             request.WriteString16Little(libcomp::Convert::ENCODING_UTF8,
@@ -108,12 +102,7 @@ bool Parsers::AccountLogout::Parse(libcomp::ManagerPacket *pPacketManager,
 
     if(normalDisconnect)
     {
-        libcomp::Packet request;
-        request.WritePacketCode(
-            ChannelToClientPacketCode_t::PACKET_LOGOUT);
-        request.WriteU32Little(
-            (uint32_t)LogoutPacketAction_t::LOGOUT_DISCONNECT);
-        client->SendPacket(request, true);
+        server->GetAccountManager()->RequestDisconnect(client);
     }
 
     return true;

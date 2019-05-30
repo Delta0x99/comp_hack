@@ -8,7 +8,7 @@
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -104,17 +104,23 @@ public:
     /**
      * Set an active client connection after its account has
      * been detected.
-     * @param connection Pointer to the client connection
+     * @param client Pointer to the client connection
      */
     void SetClientConnection(const std::shared_ptr<
-        ChannelClientConnection>& connection);
+        ChannelClientConnection>& client);
 
     /**
      * Remove a client connection.
-     * @param connection Pointer to the client connection
+     * @param client Pointer to the client connection
      */
     void RemoveClientConnection(const std::shared_ptr<
-        ChannelClientConnection>& connection);
+        ChannelClientConnection>& client);
+
+    /**
+     * Get all client connections that currently exist.
+     * @return List of pointers to all client connections
+     */
+    std::list<std::shared_ptr<ChannelClientConnection>> GetAllConnections();
 
     /**
      * Get the client connection associated to the supplied entity ID.
@@ -129,6 +135,17 @@ public:
         GetEntityClient(int32_t id, bool worldID = false);
 
     /**
+     * Get all client connections associated to the supplied entity IDs.
+     * @param ids Entity IDs or world IDs associated to the client
+     *  state to retrieve
+     * @param worldID true if the IDs are from the world, false if they are
+     *  local entity IDs
+     * @return List of pointers to client connections associated to the IDs
+     */
+    std::list<std::shared_ptr<ChannelClientConnection>>
+        GetEntityClients(std::set<int32_t> ids, bool worldID = false);
+
+    /**
      * Read a list of world CIDs from the supplied packet and convert them
      * to client connections.
      * @param p Packet containing the connection list
@@ -139,6 +156,27 @@ public:
      */
     std::list<std::shared_ptr<ChannelClientConnection>>
         GatherWorldTargetClients(libcomp::ReadOnlyPacket& p, bool& success);
+
+    /**
+     * Get all connections associated to the supplied connection's party
+     * currently on the channel, optionally restricted to the same zone
+     * @param client Pointer to the source client connection
+     * @param includeSelf If true the source connection will be included
+     *  in the returned set
+     * @param zoneRestrict If true the connections will be restricted to
+     *  only entities in the same zone
+     * @return List of client connections in the same party
+     */
+    std::list<std::shared_ptr<ChannelClientConnection>>
+        GetPartyConnections(const std::shared_ptr<
+        ChannelClientConnection>& client, bool includeSelf, bool zoneRestrict);
+
+    /**
+     * Broadcast the supplied packet to each client connection stored.
+     * Use sparingly!
+     * @param packet Packet to send
+     */
+    void BroadcastPacketToClients(libcomp::Packet& packet);
 
     /**
      * Schedule future server work to execute HandleClientTimeouts every

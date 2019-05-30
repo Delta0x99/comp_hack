@@ -17,6 +17,37 @@
 
 CMAKE_MINIMUM_REQUIRED(VERSION 3.2.3)
 
+# Do not build objects while linking to reduce memory usage.
+SET_PROPERTY(GLOBAL APPEND PROPERTY JOB_POOLS link_job_pool=1)
+SET(CMAKE_JOB_POOL_LINK link_job_pool)
+
+#
+# START OF VERSION CONSTANTS
+#
+
+# Last year the code was changed.
+SET(VERSION_YEAR  2019)
+
+# Major release (1 = pixie.)
+SET(VERSION_MAJOR 4)
+
+# Minor release (1 = SP1).
+SET(VERSION_MINOR 2)
+
+# Patch version (a hotfix).
+SET(VERSION_PATCH 1)
+
+# Codename for the version.
+SET(VERSION_CODENAME "Peorth")
+
+#
+# END OF VERSION CONSTANTS
+#
+
+# Make the code name friendly for the installer filename.
+STRING(TOLOWER "${VERSION_CODENAME}" VERSION_CODENAME_C)
+STRING(REPLACE " " "-" VERSION_CODENAME_C "${VERSION_CODENAME_C}")
+
 # Use folders to organize the projects and files.
 SET_PROPERTY(GLOBAL PROPERTY USE_FOLDERS ON)
 
@@ -29,11 +60,30 @@ ENDIF()
 
 PROJECT(comp_hack)
 
+# Detect if the host processor is x86 compatible.
+IF(CMAKE_SYSTEM_PROCESSOR MATCHES "x86|X86|amd64|AMD64|x86_64")
+    SET(X86 TRUE)
+ELSE()
+    SET(X86 FALSE)
+ENDIF()
+
 # Print the CMake version for debugging.
 MESSAGE("-- CMake version: ${CMAKE_VERSION}")
 
 # Our custom cmake modules.
 SET(COMP_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake)
+
+# Option to build the dream (if the folder is there).
+OPTION(BUILD_DREAM "Build the dream." ON)
+
+# Option to build only the updater.
+OPTION(UPDATER_ONLY "Build only the updater." OFF)
+
+# Option to build only the channel.
+OPTION(CHANNEL_ONLY "Build only the channel." OFF)
+
+# Option to import the channel for install but not to build it.
+OPTION(IMPORT_CHANNEL "Import the channel without building." OFF)
 
 # Include our custom cmake modules.
 SET(CMAKE_MODULE_PATH
@@ -41,67 +91,128 @@ SET(CMAKE_MODULE_PATH
     ${CMAKE_SOURCE_DIR}/coveralls-cmake/cmake
 )
 
+IF(IS_DIRECTORY "${CMAKE_SOURCE_DIR}/dream" AND BUILD_DREAM)
+    SET(CMAKE_MODULE_PATH
+        ${CMAKE_MODULE_PATH}
+        ${CMAKE_SOURCE_DIR}/dream/cmake
+    )
+ENDIF(IS_DIRECTORY "${CMAKE_SOURCE_DIR}/dream" AND BUILD_DREAM)
+
+IF(WIN32)
+    IF(${CMAKE_SIZEOF_VOID_P} EQUAL 4)
+        SET(CPACK_PACKAGE_FILE_NAME "comp_hack-${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_PATCH}-${VERSION_CODENAME_C}-win32")
+    ELSE()
+        SET(CPACK_PACKAGE_FILE_NAME "comp_hack-${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_PATCH}-${VERSION_CODENAME_C}-win64")
+    ENDIF()
+ELSE(WIN32)
+    SET(CPACK_PACKAGE_FILE_NAME "comp_hack-${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_PATCH}-${VERSION_CODENAME_C}")
+ENDIF(WIN32)
+
+SET(CPACK_PACKAGE_NAME "COMP_hack Server (${VERSION_CODENAME})")
+SET(CPACK_PACKAGE_VENDOR "COMP_hack Team")
+SET(CPACK_PACKAGE_CONTACT "compomega@tutanota.com")
+SET(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_SOURCE_DIR}/LICENSE.txt")
+SET(CPACK_PACKAGE_VERSION_MAJOR ${VERSION_MAJOR})
+SET(CPACK_PACKAGE_VERSION_MINOR ${VERSION_MINOR})
+SET(CPACK_PACKAGE_VERSION_PATCH ${VERSION_PATCH})
+SET(CPACK_COMPONENTS_ALL runtime lobby world channel tools config webroot docs)
+
+SET(CPACK_COMPONENT_RUNTIME_DISPLAY_NAME "C++ Runtime Library")
+SET(CPACK_COMPONENT_RUNTIME_DESCRIPTION "Runtime library needed by the software.")
+SET(CPACK_COMPONENT_RUNTUME_REQUIRED TRUE)
+SET(CPACK_COMPONENT_LOBBY_DISPLAY_NAME "Lobby Server")
+SET(CPACK_COMPONENT_LOBBY_DESCRIPTION "Lobby server to manage characters and login accounts.")
+SET(CPACK_COMPONENT_WORLD_DISPLAY_NAME "World Server")
+SET(CPACK_COMPONENT_WORLD_DESCRIPTION "World server to manage communication between channels.")
+SET(CPACK_COMPONENT_CHANNEL_DISPLAY_NAME "Channel Server")
+SET(CPACK_COMPONENT_CHANNEL_DESCRIPTION "Channel server to manage gameplay.")
+SET(CPACK_COMPONENT_TOOLS_DISPLAY_NAME "Tools")
+SET(CPACK_COMPONENT_TOOLS_DESCRIPTION "Tools for debug, development and content creation.")
+SET(CPACK_COMPONENT_CONFIG_DISPLAY_NAME "Example Configuration")
+SET(CPACK_COMPONENT_CONFIG_DESCRIPTION "Example configuration files to get up and running.")
+SET(CPACK_COMPONENT_WEBROOT_DISPLAY_NAME "API Website Files")
+SET(CPACK_COMPONENT_WEBROOT_DESCRIPTION "Website files for the internal API (in the lobby). This includes the example account manager site.")
+SET(CPACK_COMPONENT_WEBROOT_DEPENDS lobby)
+SET(CPACK_COMPONENT_DOCS_DISPLAY_NAME "Documentation")
+SET(CPACK_COMPONENT_DOCS_DESCRIPTION "Documentation for the server.")
+
+SET(CPACK_COMPONENT_LOBBY_GROUP servers)
+SET(CPACK_COMPONENT_WORLD_GROUP servers)
+SET(CPACK_COMPONENT_CHANNEL_GROUP servers)
+
+SET(CPACK_COMPONENT_GROUP_SERVERS_DISPLAY_NAME "Servers Applications")
+SET(CPACK_COMPONENT_GROUP_SERVERS_DESCRIPTION "Main server applications.")
+SET(CPACK_COMPONENT_GROUP_SERVERS_EXPANDED TRUE)
+
 IF(WIN32)
     SET(COMP_INSTALL_DIR "/")
-    SET(CPACK_GENERATOR "ZIP;WIX")
+
+    IF(UPDATER_ONLY OR CHANNEL_ONLY)
+        SET(CPACK_GENERATOR "ZIP")
+    ELSE()
+        SET(CPACK_GENERATOR "WIX;ZIP")
+    ENDIF()
 
     #SET(CPACK_WIX_ROOT "C:\\Program Files (x86)\\WiX Toolset v3.11")
     SET(CPACK_WIX_UPGRADE_GUID "A253D8BE-ED6C-43EF-A1C5-F378F269C9E4")
     SET(CPACK_WIX_PRODUCT_ICON "${CMAKE_SOURCE_DIR}/tools/bdpatch/res/bdpatch.ico")
+    SET(CPACK_WIX_UI_BANNER "${CMAKE_SOURCE_DIR}/contrib/wix-banner.png")
+    SET(CPACK_WIX_UI_DIALOG "${CMAKE_SOURCE_DIR}/contrib/wix-background.png")
     SET(CPACK_WIX_PROGRAM_MENU_FOLDER "COMP_hack")
     SET(CPACK_WIX_PROPERTY_ARPHELPLINK "https://github.com/comphack/comp_hack")
     SET(CPACK_WIX_PATCH_FILE "${CMAKE_SOURCE_DIR}/contrib/services.wxs")
+
+    SET(CPACK_WIX_EXTENSIONS "WixFirewallExtension")
     SET(CPACK_PACKAGE_INSTALL_DIRECTORY "COMP_hack")
-    SET(CPACK_PACKAGE_NAME "COMP_hack Server (Pixie RC1)")
-    SET(CPACK_PACKAGE_VENDOR "COMP_hack Team")
-    SET(CPACK_PACKAGE_CONTACT "compomega@tutanota.com")
-    #SET(CPACK_PACKAGE_FILE_NAME "comp_hack-0.9-pixie-rc1")
-    SET(CPACK_PACKAGE_FILE_NAME "comp_hack-0.8.9-pixie-beta")
-    SET(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_SOURCE_DIR}/LICENSE.txt")
-    SET(CPACK_PACKAGE_VERSION_MAJOR 0)
-    #SET(CPACK_PACKAGE_VERSION_MINOR 9)
-    #SET(CPACK_PACKAGE_VERSION_PATCH 0)
-    SET(CPACK_PACKAGE_VERSION_MINOR 8)
-    SET(CPACK_PACKAGE_VERSION_PATCH 9)
-    SET(CPACK_PACKAGE_EXECUTABLES "comp_capgrep;Capture Analysis;comp_logger;Capture Logger;comp_map;Enemy Mapping")
+    SET(CPACK_PACKAGE_EXECUTABLES "comp_capgrep;Capture Analysis;comp_logger;Capture Logger;comp_cathedral;Cathedral of Content")
 
     SET(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS_SKIP TRUE)
 
-    INCLUDE(InstallRequiredSystemLibraries)
+    IF(NOT CHANNEL_ONLY)
+        INCLUDE(InstallRequiredSystemLibraries)
 
-    INSTALL(
-        PROGRAMS ${CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS}
-        DESTINATION /
-    )
+        INSTALL(
+            PROGRAMS ${CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS}
+            DESTINATION /
+            COMPONENT runtime
+        )
 
-    FIND_PACKAGE(Qt5Widgets REQUIRED)
+        FIND_PACKAGE(Qt5Widgets REQUIRED)
 
-    IF(Qt5Widgets_FOUND AND WIN32 AND TARGET Qt5::qmake AND NOT TARGET Qt5::windeployqt)
-        GET_TARGET_PROPERTY(_qt5_qmake_location Qt5::qmake IMPORTED_LOCATION)
+        IF(Qt5Widgets_FOUND AND WIN32 AND TARGET Qt5::qmake AND NOT TARGET Qt5::windeployqt)
+            GET_TARGET_PROPERTY(_qt5_qmake_location Qt5::qmake IMPORTED_LOCATION)
 
-        EXECUTE_PROCESS(
-            COMMAND "${_qt5_qmake_location}" -query QT_INSTALL_PREFIX
-            RESULT_VARIABLE return_code
-            OUTPUT_VARIABLE qt5_install_prefix
-            OUTPUT_STRIP_TRAILING_WHITESPACE)
+            EXECUTE_PROCESS(
+                COMMAND "${_qt5_qmake_location}" -query QT_INSTALL_PREFIX
+                RESULT_VARIABLE return_code
+                OUTPUT_VARIABLE qt5_install_prefix
+                OUTPUT_STRIP_TRAILING_WHITESPACE)
 
-        SET(imported_location "${qt5_install_prefix}/bin/windeployqt.exe")
+            SET(imported_location "${qt5_install_prefix}/bin/windeployqt.exe")
 
-        IF(EXISTS ${imported_location})
-            ADD_EXECUTABLE(Qt5::windeployqt IMPORTED)
+            IF(EXISTS ${imported_location})
+                ADD_EXECUTABLE(Qt5::windeployqt IMPORTED)
 
-            SET_TARGET_PROPERTIES(Qt5::windeployqt PROPERTIES
-                IMPORTED_LOCATION ${imported_location})
+                SET_TARGET_PROPERTIES(Qt5::windeployqt PROPERTIES
+                    IMPORTED_LOCATION ${imported_location})
+            ENDIF()
         ENDIF()
-    ENDIF()
 
-    INSTALL(FILES
-        "${CMAKE_SOURCE_DIR}/contrib/winconfig/lobby.xml"
-        "${CMAKE_SOURCE_DIR}/contrib/winconfig/channel.xml"
-        "${CMAKE_SOURCE_DIR}/contrib/winconfig/world.xml"
-        "${CMAKE_SOURCE_DIR}/contrib/winconfig/setup.xml"
-        "${CMAKE_SOURCE_DIR}/contrib/testing/constants.xml"
-        DESTINATION config)
+        INSTALL(FILES
+            "${CMAKE_SOURCE_DIR}/contrib/winconfig/lobby.xml"
+            "${CMAKE_SOURCE_DIR}/contrib/winconfig/channel.xml"
+            "${CMAKE_SOURCE_DIR}/contrib/winconfig/world.xml"
+            "${CMAKE_SOURCE_DIR}/contrib/winconfig/setup.xml"
+            "${CMAKE_SOURCE_DIR}/contrib/winconfig/newcharacter.xml"
+            "${CMAKE_SOURCE_DIR}/contrib/testing/config/constants.xml"
+            DESTINATION config
+            COMPONENT config)
+
+        INSTALL(DIRECTORY
+            "${CMAKE_SOURCE_DIR}/contrib/webroot"
+            DESTINATION /
+            COMPONENT webroot)
+    ENDIF(NOT CHANNEL_ONLY)
 ELSE()
     SET(COMP_INSTALL_DIR "bin")
     SET(CPACK_GENERATOR "TGZ;TBZ2;DEB")
@@ -120,6 +231,19 @@ INCLUDE(${COMP_MODULE_PATH}/flags.cmake)
 # Utilities for building with MSVC.
 INCLUDE(${COMP_MODULE_PATH}/msvc.cmake)
 
+# Option to combine packets into one source to build.
+OPTION(SINGLE_SOURCE_PACKETS "Combine all packets into one source file." OFF)
+
+# Option to compile all objgen objects into one source file.
+OPTION(SINGLE_OBJGEN "Compile all objgen objects into one source file." OFF)
+
+# Use Cotire to generate pre-compiled headers.
+OPTION(USE_COTIRE "Use cotire to build with pre-compiled headers." OFF)
+
+IF(USE_COTIRE)
+    INCLUDE(cotire)
+ENDIF(USE_COTIRE)
+
 # Option to disable build warnings/errors.
 OPTION(NO_WARNINGS "Disable the compiler warnings and errors." OFF)
 
@@ -128,6 +252,9 @@ OPTION(DISABLE_TESTING "Disable all tests." OFF)
 
 # Option for the static runtime on Windows.
 OPTION(USE_STATIC_RUNTIME "Use the static MSVC runtime." OFF)
+
+# Option to use pre-built objgen & libcomp.
+OPTION(USE_PREBUILT_LIBCOMP "Use pre-built objgen and libcomp" OFF)
 
 IF(WIN32)
     OPTION(GENERATE_DOCUMENTATION "Generate documentation for the project." OFF)
@@ -190,13 +317,32 @@ ELSE()
 ENDIF()
 
 # Include all build code for external projects.
-INCLUDE(${COMP_MODULE_PATH}/external.cmake)
+IF(EXISTS "${CMAKE_SOURCE_DIR}/binaries")
+    MESSAGE("-- Using pre-built binaries.")
+
+    INCLUDE(${COMP_MODULE_PATH}/binaries.cmake)
+
+    IF(IS_DIRECTORY "${CMAKE_SOURCE_DIR}/dream" AND BUILD_DREAM)
+        INCLUDE(${CMAKE_SOURCE_DIR}/dream/cmake/binaries.cmake)
+    ENDIF(IS_DIRECTORY "${CMAKE_SOURCE_DIR}/dream" AND BUILD_DREAM)
+ELSE()
+    MESSAGE("-- Building external binaries.")
+
+    INCLUDE(${COMP_MODULE_PATH}/external.cmake)
+
+    IF(IS_DIRECTORY "${CMAKE_SOURCE_DIR}/dream" AND BUILD_DREAM)
+        INCLUDE(${CMAKE_SOURCE_DIR}/dream/cmake/external.cmake)
+    ENDIF(IS_DIRECTORY "${CMAKE_SOURCE_DIR}/dream" AND BUILD_DREAM)
+ENDIF()
 
 # PDB not found for library.
 ADD_LINKER_FLAGS(AUTO /ignore:4099)
 
+# Object file level parallelism for MSVC.
+ADD_COMPILER_FLAGS(AUTO /MP)
+
 # UTF-8 source encoding for MSVC.
-ADD_COMPILER_FLAGS(AUTO /utf-8)
+ADD_COMPILER_FLAGS(AUTO /utf-8 /bigobj)
 
 # Build for Windows 7 and higher.
 # See: https://msdn.microsoft.com/en-us/library/6sehtctf.aspx
@@ -215,6 +361,10 @@ ADD_DEFINITIONS(
 # SQLite3 is included in the source repo.
 SET(SQLITE3_INCLUDE_DIRS "${CMAKE_SOURCE_DIR}/deps/sqlite3")
 
+# Sqrat is included as a submodule (it's header only).
+SET(SQRAT_INCLUDE_DIRS "${CMAKE_SOURCE_DIR}/deps/sqrat/include")
+SET(SQRAT_DEFINES "-DSCRAT_USE_CXX11_OPTIMIZATIONS=1")
+
 # Enable testing.
 IF(NOT DISABLE_TESTING)
     INCLUDE(CTest)
@@ -229,14 +379,13 @@ ELSE(${LIBCOMP_ENDIAN})
     ADD_DEFINITIONS(-DLIBCOMP_LITTLEENDIAN)
 ENDIF(${LIBCOMP_ENDIAN})
 
+# Require C++14 to build the project.
+SET(CMAKE_CXX_STANDARD 14)
+SET(CMAKE_CXX_STANDARD_REQUIRED ON)
+SET(CMAKE_CXX_EXTENSIONS OFF)
+
 # Default Linux (gcc/clang) builds to debug and MinGW builds to release.
 IF(NOT MSVC)
-    IF(BUILD_OPTIMIZED)
-        SET(CMAKE_BUILD_TYPE Release)
-    ELSE()
-        SET(CMAKE_BUILD_TYPE Debug)
-    ENDIF()
-
     # Ensure C++14 support is on.
     ADD_CXX_FLAGS(AUTO -std=c++14)
 
@@ -246,11 +395,14 @@ IF(NOT MSVC)
 
     # Determine basic gcc/clang/mingw flags for release mode.
     IF(BUILD_OPTIMIZED)
-        ADD_COMPILER_FLAGS(AUTO -O3 -msse3)
-    ELSE(BUILD_OPTIMIZED)
-        ADD_COMPILER_FLAGS(AUTO -O3 -msse3)
+        IF(X86)
+            ADD_COMPILER_FLAGS(AUTO -O3 -msse3)
+        ELSE()
+            ADD_COMPILER_FLAGS(AUTO -O3)
+        ENDIF()
     ENDIF(BUILD_OPTIMIZED)
 
+    # Strip release builds.
     ADD_LINKER_FLAGS_RELEASE(AUTO -s)
 ENDIF(NOT MSVC)
 
@@ -271,6 +423,9 @@ ELSE()
         -Wconversion -Wsign-conversion -g)
 ENDIF()
 
+# Ignore the warning about mixed use of override.
+ADD_COMPILER_FLAGS(AUTO -Wno-inconsistent-missing-override)
+
 # Warning level 4 and treat warnings as errors (MSVC).
 # ADD_COMPILER_FLAGS(AUTO /W4 /WX)
 
@@ -287,20 +442,93 @@ ENDIF(COVERALLS)
 # Place all executables in the same directory.
 SET(EXECUTABLE_OUTPUT_PATH "${CMAKE_CURRENT_BINARY_DIR}/bin")
 
+IF(NOT WIN32 AND NOT BSD)
+    FIND_PACKAGE(Systemd QUIET)
+
+    IF(SYSTEMD_FOUND)
+        ADD_COMPILER_FLAGS(AUTO ${SYSTEMD_DEFINITIONS} -DHAVE_SYSTEMD=1)
+    ENDIF(SYSTEMD_FOUND)
+ENDIF(NOT WIN32 AND NOT BSD)
+
+# Add in the build of libobjgen and comp_objgen.
+IF(USE_PREBUILT_LIBCOMP)
+    # We need this for apps that pull in libcomp.
+    FIND_PACKAGE(Threads REQUIRED)
+
+    IF(SYSTEMD_FOUND)
+        SET(SYSTEMD_INCLUDES ${SYSTEMD_INCLUDE_DIRS})
+    ENDIF(SYSTEMD_FOUND)
+
+    IF(SYSTEMD_FOUND)
+        SET(SYSTEMD_LIBS ${SYSTEMD_LIBRARIES})
+    ENDIF(SYSTEMD_FOUND)
+
+    IF(WIN32)
+        SET(WIN32_LIBS comp shlwapi advapi32 iphlpapi psapi shell32
+            userenv ws2_32 dbghelp)
+    ENDIF(WIN32)
+
+    ADD_EXECUTABLE(comp_objgen IMPORTED)
+
+    IF(WIN32)
+        SET_TARGET_PROPERTIES(comp_objgen PROPERTIES IMPORTED_LOCATION
+            "${CMAKE_SOURCE_DIR}/deps/libcomp/comp_objgen.exe")
+    ELSE()
+        SET_TARGET_PROPERTIES(comp_objgen PROPERTIES IMPORTED_LOCATION
+            "${CMAKE_SOURCE_DIR}/deps/libcomp/bin/comp_objgen")
+    ENDIF(WIN32)
+
+    IF(WIN32)
+        ADD_LIBRARY(objgen STATIC IMPORTED)
+        SET_TARGET_PROPERTIES(objgen PROPERTIES
+            IMPORTED_LOCATION_RELEASE "${CMAKE_SOURCE_DIR}/deps/libcomp/lib/${CMAKE_STATIC_LIBRARY_PREFIX}objgen${CMAKE_STATIC_LIBRARY_SUFFIX}"
+            IMPORTED_LOCATION_RELWITHDEBINFO "${CMAKE_SOURCE_DIR}/deps/libcomp/lib/${CMAKE_STATIC_LIBRARY_PREFIX}objgen${CMAKE_STATIC_LIBRARY_SUFFIX}"
+            IMPORTED_LOCATION_DEBUG "${CMAKE_SOURCE_DIR}/deps/libcomp/lib/${CMAKE_STATIC_LIBRARY_PREFIX}objgen${CMAKE_STATIC_LIBRARY_SUFFIX}")
+    ELSE()
+        ADD_LIBRARY(objgen STATIC IMPORTED)
+        SET_TARGET_PROPERTIES(objgen PROPERTIES IMPORTED_LOCATION
+            "${CMAKE_SOURCE_DIR}/deps/libcomp/lib/${CMAKE_STATIC_LIBRARY_PREFIX}objgen${CMAKE_STATIC_LIBRARY_SUFFIX}")
+    ENDIF()
+
+    SET_TARGET_PROPERTIES(objgen PROPERTIES
+        INTERFACE_INCLUDE_DIRECTORIES "${CMAKE_SOURCE_DIR}/deps/libcomp/include;${CMAKE_SOURCE_DIR}/libcomp/libobjgen/src")
+
+    IF(WIN32)
+        ADD_LIBRARY(comp STATIC IMPORTED)
+        SET_TARGET_PROPERTIES(comp PROPERTIES
+            IMPORTED_LOCATION_RELEASE "${CMAKE_SOURCE_DIR}/deps/libcomp/lib/${CMAKE_STATIC_LIBRARY_PREFIX}comp${CMAKE_STATIC_LIBRARY_SUFFIX}"
+            IMPORTED_LOCATION_RELWITHDEBINFO "${CMAKE_SOURCE_DIR}/deps/libcomp/lib/${CMAKE_STATIC_LIBRARY_PREFIX}comp${CMAKE_STATIC_LIBRARY_SUFFIX}"
+            IMPORTED_LOCATION_DEBUG "${CMAKE_SOURCE_DIR}/deps/libcomp/lib/${CMAKE_STATIC_LIBRARY_PREFIX}comp${CMAKE_STATIC_LIBRARY_SUFFIX}")
+    ELSE()
+        ADD_LIBRARY(comp STATIC IMPORTED)
+        SET_TARGET_PROPERTIES(comp PROPERTIES IMPORTED_LOCATION
+            "${CMAKE_SOURCE_DIR}/deps/libcomp/lib/${CMAKE_STATIC_LIBRARY_PREFIX}comp${CMAKE_STATIC_LIBRARY_SUFFIX}")
+    ENDIF()
+
+    SET_TARGET_PROPERTIES(comp PROPERTIES
+        INTERFACE_INCLUDE_DIRECTORIES "${CMAKE_SOURCE_DIR}/deps/libcomp/include;${CMAKE_SOURCE_DIR}/libcomp/libcomp/src;${ASIO_INCLUDE_DIRS};${SYSTEMD_INCLUDES};${SQRAT_INCLUDE_DIRS};${OPENSSL_INCLUDE_DIR};${CMAKE_BINARY_DIR}/libconfig;${GSL_INCLUDE_DIRS}"
+        INTERFACE_LINK_LIBRARIES "mariadbclient;${OPENSSL_LIBRARIES};${ZLIB_LIBRARIES};${SYSTEM_LIBRARIES};${CMAKE_THREAD_LIBS_INIT};objgen;sqlite3;squirrel;sqstdlib;ttvfs;ttvfs_zip;tinyxml2;physfs;${SYSTEMD_LIBS};${WIN32_LIBS}"
+        INTERFACE_COMPILE_DEFINITIONS "SCRAT_USE_CXX11_OPTIMIZATIONS=1")
+
+ENDIF(USE_PREBUILT_LIBCOMP)
+
 # List of common include paths for every project using libobjgen.
 SET(LIBOBJGEN_INCLUDES
     ${GSL_INCLUDE_DIRS}
-    ${CMAKE_SOURCE_DIR}/libobjgen/src
+    ${CMAKE_SOURCE_DIR}/libcomp/libobjgen/src
     # Needed for PushIgnore.h and PopIgnore.h.
-    ${CMAKE_SOURCE_DIR}/libcomp/src
+    ${CMAKE_SOURCE_DIR}/libcomp/libcomp/src
 )
 
 # List of common include paths for every project using libcomp.
 SET(LIBCOMP_INCLUDES
     ${OPENSSL_INCLUDE_DIR}
-    ${CMAKE_SOURCE_DIR}/libcomp/src
-    ${CMAKE_BINARY_DIR}/libcomp/objgen
+    ${CMAKE_SOURCE_DIR}/libcomp/libcomp/src
+    ${CMAKE_BINARY_DIR}/libcomp/libcomp/objgen
 )
+
+SET(CHANNEL_DIR ${CMAKE_SOURCE_DIR}/server/channel)
+SET(LIBCOMP_DIR ${CMAKE_SOURCE_DIR}/libcomp/libcomp)
 
 SET(COVERALLS_SRCS "" CACHE INTERNAL "Coverage source files")
 
@@ -329,13 +557,14 @@ MACRO(ADD_QT_DEPS target)
             DIRECTORY
             "${CMAKE_CURRENT_BINARY_DIR}/windeployqt/"
             DESTINATION /
+            COMPONENT tools
         )
     ENDIF()
 ENDMACRO()
 
 # This macro will create a target to generate the documentation using the
 # specified Doxyfile.in file.
-MACRO(GENERATE_DOCS doxyfile)
+MACRO(GENERATE_DOCS_EX doxyfile targetname)
     # Make sure we have Doxygen.
     FIND_PACKAGE(Doxygen)
 
@@ -347,23 +576,29 @@ MACRO(GENERATE_DOCS doxyfile)
         # Create the target that will run Doxygen. The working directory is
         # the build directory so all the documentation ends up in the same
         # directory structure.
-        IF(${PROJECT_NAME} MATCHES "libcomp")
-            ADD_CUSTOM_TARGET(doc-${PROJECT_NAME} ${DOXYGEN_EXECUTABLE}
+        IF(${targetname} MATCHES "libcomp")
+            ADD_CUSTOM_TARGET(doc-${targetname} ${DOXYGEN_EXECUTABLE}
                 ${CMAKE_CURRENT_BINARY_DIR}/Doxyfile WORKING_DIRECTORY
                 ${CMAKE_BINARY_DIR} COMMENT
                 "Generating ${PROJECT_NAME} API documentation" VERBATIM)
-        ELSE(${PROJECT_NAME} MATCHES "libcomp")
-            ADD_CUSTOM_TARGET(doc-${PROJECT_NAME} ${DOXYGEN_EXECUTABLE}
+        ELSE(${targetname} MATCHES "libcomp")
+            ADD_CUSTOM_TARGET(doc-${targetname} ${DOXYGEN_EXECUTABLE}
                 ${CMAKE_CURRENT_BINARY_DIR}/Doxyfile WORKING_DIRECTORY
                 ${CMAKE_BINARY_DIR} DEPENDS doc-libcomp COMMENT
-                "Generating ${PROJECT_NAME} API documentation" VERBATIM)
-        ENDIF(${PROJECT_NAME} MATCHES "libcomp")
+                "Generating ${targetname} API documentation" VERBATIM)
+        ENDIF(${targetname} MATCHES "libcomp")
 
         # Add the target to a list of documentation targets.
         GET_PROPERTY(targets GLOBAL PROPERTY DOC_TARGETS)
         SET_PROPERTY(GLOBAL PROPERTY DOC_TARGETS
-            doc-${PROJECT_NAME} ${targets})
+            doc-${targetname} ${targets})
     ENDIF(DOXYGEN_FOUND AND GENERATE_DOCUMENTATION)
+ENDMACRO(GENERATE_DOCS_EX doxyfile)
+
+# This macro will create a target to generate the documentation using the
+# specified Doxyfile.in file.
+MACRO(GENERATE_DOCS doxyfile)
+    GENERATE_DOCS_EX("${doxyfile}" ${PROJECT_NAME})
 ENDMACRO(GENERATE_DOCS doxyfile)
 
 # When building Windows executables, this macro packs the executable. This
@@ -529,13 +764,23 @@ MACRO(CREATE_GTESTS)
     ENDFOREACH(test ${ARGN})
 ENDMACRO(CREATE_GTESTS)
 
+# If the dream code exists in the "dream" directory and BUILD_DREAM is set,
+# build the dream application as well.
+IF(IS_DIRECTORY "${CMAKE_SOURCE_DIR}/dream" AND BUILD_DREAM AND NOT UPDATER_ONLY AND NOT CHANNEL_ONLY)
+    ADD_SUBDIRECTORY(dream)
+ENDIF(IS_DIRECTORY "${CMAKE_SOURCE_DIR}/dream" AND BUILD_DREAM AND NOT UPDATER_ONLY AND NOT CHANNEL_ONLY)
+
 # This must come first so that objgen is found for the macro bellow. As a
 # consequence, none of the tools can define their own structures to be
 # generated by objgen. This is not a big deal because for the most part
 # these should be defined in libcomp.
-ADD_SUBDIRECTORY(deps)
-ADD_SUBDIRECTORY(libobjgen)
-ADD_SUBDIRECTORY(tools)
+IF(NOT UPDATER_ONLY)
+    ADD_SUBDIRECTORY(deps)
+ENDIF(NOT UPDATER_ONLY)
+
+IF(NOT CHANNEL_ONLY)
+    ADD_SUBDIRECTORY(tools)
+ENDIF(NOT CHANNEL_ONLY)
 
 # This macro generates code using objgen. The arguments must start with the
 # name of the output variable that will be passed to the ADD_EXECUTABLE command
@@ -557,6 +802,11 @@ MACRO(OBJGEN_XML outfiles xml)
     # Set the master xml schema as a dependency.
     SET(deps ${xml_abs})
 
+    IF(SINGLE_OBJGEN)
+        FILE(WRITE "${CMAKE_CURRENT_BINARY_DIR}/objgen/ObjectCollection.cpp.in"
+            "// This file is generated by CMake! DO NOT EDIT!\n")
+    ENDIF(SINGLE_OBJGEN)
+
     # For each argument after the output variable and master xml schema.
     FOREACH(it ${ARGN})
         # Get the absolute path and extension to the file or directory.
@@ -570,6 +820,13 @@ MACRO(OBJGEN_XML outfiles xml)
             # Add the source or header file as a generated output that must
             # then be compiled.
             SET(outs ${outs} "${CMAKE_CURRENT_BINARY_DIR}/objgen/${it}")
+
+            # Add the source as a file to include for the single source file.
+            IF(SINGLE_OBJGEN AND ex MATCHES "cpp")
+                FILE(APPEND
+                    "${CMAKE_CURRENT_BINARY_DIR}/objgen/ObjectCollection.cpp.in"
+                    "#include \"${it}\"\n")
+            ENDIF(SINGLE_OBJGEN AND ex MATCHES "cpp")
         ELSE() # Everything else is assumed to be a directory
             # Add the directory as a search path for other xml schema files.
             SET(incs ${incs} "-I" "${fp}")
@@ -587,8 +844,29 @@ MACRO(OBJGEN_XML outfiles xml)
     ENDFOREACH(out ${outs})
 
     # Set the list of output files to be generated, compiled, and linked.
-    SET(${outfiles} ${${outfiles}} ${outs})
+    IF(SINGLE_OBJGEN)
+        ADD_CUSTOM_COMMAND(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/objgen/ObjectCollection.cpp"
+            COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_BINARY_DIR}/objgen/ObjectCollection.cpp.in"
+            "${CMAKE_CURRENT_BINARY_DIR}/objgen/ObjectCollection.cpp"
+            DEPENDS ${outs})
+
+        SET(${outfiles} ${${outfiles}} "${CMAKE_CURRENT_BINARY_DIR}/objgen/ObjectCollection.cpp")
+    ELSE(SINGLE_OBJGEN)
+        SET(${outfiles} ${${outfiles}} ${outs})
+    ENDIF(SINGLE_OBJGEN)
 ENDMACRO(OBJGEN_XML outfiles xml)
+
+# Macro to replace the packet source files with a single source file to build.
+MACRO(COMBINE_PACKETS listvar)
+FILE(WRITE "${CMAKE_CURRENT_BINARY_DIR}/Packets.cpp" "")
+
+    FOREACH(src IN LISTS ${listvar})
+        STRING(REGEX REPLACE "^src/(.+)$" "#include \"\\1\"\n" src "${src}")
+        FILE(APPEND "${CMAKE_CURRENT_BINARY_DIR}/Packets.cpp" "${src}")
+    ENDFOREACH()
+
+    SET(${listvar} "${CMAKE_CURRENT_BINARY_DIR}/Packets.cpp")
+ENDMACRO(COMBINE_PACKETS listvar)
 
 # Macro to create rspec tests (web testing with ruby).
 MACRO(RSPEC_TESTS)
@@ -600,30 +878,33 @@ MACRO(RSPEC_TESTS)
     ENDFOREACH(test ${ARGN})
 ENDMACRO(RSPEC_TESTS)
 
-IF(NOT WIN32 AND NOT BSD)
-    FIND_PACKAGE(Systemd QUIET)
+IF(NOT UPDATER_ONLY AND NOT USE_PREBUILT_LIBCOMP)
+    ADD_SUBDIRECTORY(libcomp)
+    #ADD_SUBDIRECTORY(chanman)
+ENDIF(NOT UPDATER_ONLY AND NOT USE_PREBUILT_LIBCOMP)
 
-    IF(SYSTEMD_FOUND)
-        ADD_COMPILER_FLAGS(AUTO ${SYSTEMD_DEFINITIONS} -DHAVE_SYSTEMD=1)
-    ENDIF(SYSTEMD_FOUND)
-ENDIF(NOT WIN32 AND NOT BSD)
+IF(USE_PREBUILT_LIBCOMP)
+    # Write the version information into the Constants.h file.
+    CONFIGURE_FILE(libcomp/libcomp/src/Constants.h.in
+        "${CMAKE_BINARY_DIR}/libconfig/Constants.h"
+        ESCAPE_QUOTES @ONLY NEWLINE_STYLE UNIX)
 
-ADD_SUBDIRECTORY(libcomp)
-#ADD_SUBDIRECTORY(chanman)
+    # Add a target to generate API documentation.
+    FILE(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/api/libcomp)
+    GENERATE_DOCS_EX(libcomp/libcomp/doc/Doxyfile.in libcomp)
+ENDIF(USE_PREBUILT_LIBCOMP)
 
-# If the client code exists in the "client" directory and DISABLE_CLIENT is not
-# defined, build the client application as well.
-IF(IS_DIRECTORY "${CMAKE_SOURCE_DIR}/client" AND NOT ${DISABLE_CLIENT})
-    #ADD_SUBDIRECTORY(client)
-ENDIF(IS_DIRECTORY "${CMAKE_SOURCE_DIR}/client" AND NOT ${DISABLE_CLIENT})
-
-#ADD_SUBDIRECTORY(console)
-ADD_SUBDIRECTORY(server)
+IF(NOT UPDATER_ONLY)
+    ADD_SUBDIRECTORY(libconfig)
+    #ADD_SUBDIRECTORY(console)
+    ADD_SUBDIRECTORY(server)
+ENDIF(NOT UPDATER_ONLY)
 
 # Windows does not have the server spawning code.
-IF(NOT WIN32)
+IF(NOT WIN32 AND NOT UPDATER_ONLY AND NOT CHANNEL_ONLY)
     ADD_SUBDIRECTORY(libtester)
-ENDIF(NOT WIN32)
+    ADD_SUBDIRECTORY(client)
+ENDIF(NOT WIN32 AND NOT UPDATER_ONLY AND NOT CHANNEL_ONLY)
 
 #ADD_SUBDIRECTORY(updater)
 
@@ -631,11 +912,14 @@ ENDIF(NOT WIN32)
 GET_PROPERTY(targets GLOBAL PROPERTY DOC_TARGETS)
 ADD_CUSTOM_TARGET(doc ALL DEPENDS ${targets})
 SET_TARGET_PROPERTIES(doc PROPERTIES FOLDER "SpecialTargets")
-ADD_SUBDIRECTORY(docs)
 
-IF(NOT BSD)
+IF(NOT UPDATER_ONLY AND NOT CHANNEL_ONLY)
+    ADD_SUBDIRECTORY(docs)
+ENDIF(NOT UPDATER_ONLY AND NOT CHANNEL_ONLY)
+
+IF(NOT BSD AND NOT UPDATER_ONLY AND NOT CHANNEL_ONLY)
     #ADD_SUBDIRECTORY(features)
-ENDIF(NOT BSD)
+ENDIF(NOT BSD AND NOT UPDATER_ONLY AND NOT CHANNEL_ONLY)
 
 # On Linux system, install the icons where they can be found. These are used
 # for the application menu launcher icons.
@@ -660,13 +944,15 @@ IF(NOT WIN32)
         DESTINATION ${CMAKE_INSTALL_LOCALSTATEDIR}/lib/comp_hack)
     INSTALL(DIRECTORY ${CMAKE_SOURCE_DIR}/contrib/nixconfig/
         DESTINATION ${CMAKE_INSTALL_SYSCONFDIR}/comp_hack)
-    INSTALL(FILES ${CMAKE_SOURCE_DIR}/contrib/testing/constants.xml
+    INSTALL(FILES ${CMAKE_SOURCE_DIR}/contrib/testing/config/constants.xml
+        DESTINATION ${CMAKE_INSTALL_SYSCONFDIR}/comp_hack)
+    INSTALL(FILES ${CMAKE_SOURCE_DIR}/contrib/winconfig/newcharacter.xml
         DESTINATION ${CMAKE_INSTALL_SYSCONFDIR}/comp_hack)
 ENDIF(NOT WIN32)
 
 # Copy all contrib/testing to the bin directory.
 FILE(COPY "${CMAKE_SOURCE_DIR}/contrib/testing"
-    DESTINATION "${CMAKE_BINARY_DIR}/bin")
+    DESTINATION "${CMAKE_BINARY_DIR}")
 
 IF(COVERALLS)
     coveralls_setup("${COVERALLS_SRCS}" ON)
@@ -675,7 +961,165 @@ ENDIF(COVERALLS)
 # Make sure we have Doxygen.
 FIND_PACKAGE(Doxygen)
 
-If(DOXYGEN_FOUND AND GENERATE_DOCUMENTATION)
+If(DOXYGEN_FOUND AND GENERATE_DOCUMENTATION AND NOT WIN32)
     INSTALL(DIRECTORY ${CMAKE_BINARY_DIR}/api
-        DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/doc/comp_hack)
-ENDIF(DOXYGEN_FOUND AND GENERATE_DOCUMENTATION)
+        DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/doc/comp_hack
+        COMPONENT docs)
+ENDIF(DOXYGEN_FOUND AND GENERATE_DOCUMENTATION AND NOT WIN32)
+
+FUNCTION(BINARY_DATA_COMMAND bdtype inpath encrypt)
+    GET_FILENAME_COMPONENT(pre_outdir "${inpath}" DIRECTORY)
+    GET_FILENAME_COMPONENT(outfn "${inpath}" NAME_WE)
+    SET(indir "${CMAKE_CURRENT_SOURCE_DIR}/contrib/testing")
+    SET(outdir "${CMAKE_BINARY_DIR}/testing/${pre_outdir}")
+    SET(outpath "${outdir}/${outfn}.bin")
+    SET(encpath "${outdir}/${outfn}.sbin")
+    SET(pre_encpath "${pre_outdir}/${outfn}.sbin")
+
+    IF(EXISTS "${inputdir}/${outdir}/${outfn}.xsd")
+        # Lint first, then generate the bin file.
+        ADD_CUSTOM_COMMAND(OUTPUT "${outpath}"
+            COMMAND "${XMLLINT}" "-schema"
+            "${outdir}/${outfn}.xsd"
+            "${indir}/${inpath}"
+            "--noout"
+            COMMAND comp_bdpatch save "${bdtype}"
+            "${indir}/${inpath}"
+            "${outpath}"
+            DEPENDS "${indir}/${inpath}"
+            DEPENDS comp_bdpatch
+            COMMENT "Generating ${outpath}")
+    ELSE()
+        ADD_CUSTOM_COMMAND(OUTPUT "${outpath}"
+            COMMAND comp_bdpatch save "${bdtype}"
+            "${indir}/${inpath}"
+            "${outpath}"
+            DEPENDS "${indir}/${inpath}"
+            DEPENDS comp_bdpatch
+            COMMENT "Generating ${pre_outpath}")
+    ENDIF()
+
+    IF(encrypt)
+        ADD_CUSTOM_COMMAND(OUTPUT "${encpath}"
+            COMMAND comp_encrypt
+            "${outpath}"
+            "${encpath}"
+            DEPENDS "${outpath}"
+            DEPENDS comp_encrypt
+            COMMENT "Generating ${pre_encpath}")
+    ELSE()
+    ENDIF()
+ENDFUNCTION(BINARY_DATA_COMMAND)
+
+FUNCTION(ENCRYPTED_BINARY_DATA)
+    SET(parse_state 0)
+    SET(depends "")
+
+    FOREACH(arg ${ARGN})
+        IF(0 EQUAL ${parse_state})
+            SET(bdtype "${arg}")
+            SET(parse_state 1)
+        ELSE()
+            BINARY_DATA_COMMAND("${bdtype}" "${arg}" True)
+
+            GET_FILENAME_COMPONENT(outdir "${arg}" DIRECTORY)
+            GET_FILENAME_COMPONENT(outfn "${arg}" NAME_WE)
+            SET(outpath "${outdir}/${outfn}.bin")
+            SET(encpath "${outdir}/${outfn}.sbin")
+
+            LIST(APPEND depends "${CMAKE_BINARY_DIR}/testing/${encpath}")
+
+            SET(parse_state 0)
+        ENDIF()
+    ENDFOREACH()
+
+    ADD_CUSTOM_TARGET(sbin ALL DEPENDS ${depends})
+ENDFUNCTION(ENCRYPTED_BINARY_DATA)
+
+FUNCTION(UNENCRYPTED_BINARY_DATA)
+    SET(parse_state 0)
+    SET(depends "")
+
+    FOREACH(arg ${ARGN})
+        IF(0 EQUAL ${parse_state})
+            SET(bdtype "${arg}")
+            SET(parse_state 1)
+        ELSE()
+            BINARY_DATA_COMMAND("${bdtype}" "${arg}" False)
+
+            GET_FILENAME_COMPONENT(outdir "${arg}" DIRECTORY)
+            GET_FILENAME_COMPONENT(outfn "${arg}" NAME_WE)
+            SET(outpath "${outdir}/${outfn}.bin")
+
+            LIST(APPEND depends "${CMAKE_BINARY_DIR}/testing/${outpath}")
+
+            SET(parse_state 0)
+        ENDIF()
+    ENDFOREACH()
+
+    ADD_CUSTOM_TARGET(bin ALL DEPENDS ${depends})
+ENDFUNCTION(UNENCRYPTED_BINARY_DATA)
+
+IF(NOT UPDATER_ONLY AND NOT CHANNEL_ONLY)
+    UNENCRYPTED_BINARY_DATA(
+        dynamicmap datastore/BinaryData/Client/DynamicMapData.xml
+    )
+
+    ENCRYPTED_BINARY_DATA(
+        ai datastore/BinaryData/Shield/AIData.xml
+        blend datastore/BinaryData/Shield/BlendData.xml
+        blendext datastore/BinaryData/Shield/BlendExtData.xml
+        chourai datastore/BinaryData/Shield/CHouraiData.xml
+        citem datastore/BinaryData/Shield/CItemData.xml
+        title datastore/BinaryData/Shield/CodeNameData.xml
+        cultureitem datastore/BinaryData/Shield/CultureItemData.xml
+        devilbook datastore/BinaryData/Shield/DevilBookData.xml
+        devilboost datastore/BinaryData/Shield/DevilBoostData.xml
+        devilboostextra datastore/BinaryData/Shield/DevilBoostExtraData.xml
+        devilboostitem datastore/BinaryData/Shield/DevilBoostItemData.xml
+        devilboostlot datastore/BinaryData/Shield/DevilBoostLotData.xml
+        devil datastore/BinaryData/Shield/DevilData.xml
+        devilequip datastore/BinaryData/Shield/DevilEquipmentData.xml
+        devilequipitem datastore/BinaryData/Shield/DevilEquipmentItemData.xml
+        devilfusion datastore/BinaryData/Shield/DevilFusionData.xml
+        devillvluprate datastore/BinaryData/Shield/DevilLVUpRateData.xml
+        disassembly datastore/BinaryData/Shield/DisassemblyData.xml
+        disassemblytrig datastore/BinaryData/Shield/DisassemblyTriggerData.xml
+        enchant datastore/BinaryData/Shield/EnchantData.xml
+        equipset datastore/BinaryData/Shield/EquipmentSetData.xml
+        exchange datastore/BinaryData/Shield/ExchangeData.xml
+        expert datastore/BinaryData/Shield/ExpertClassData.xml
+        guardianassist datastore/BinaryData/Shield/GuardianAssistData.xml
+        guardianlevel datastore/BinaryData/Shield/GuardianLevelData.xml
+        guardianspecial datastore/BinaryData/Shield/GuardianSpecialData.xml
+        guardianunlock datastore/BinaryData/Shield/GuardianUnlockData.xml
+        hnpc datastore/BinaryData/Shield/hNPCData.xml
+        item datastore/BinaryData/Shield/ItemData.xml
+        mission datastore/BinaryData/Shield/MissionData.xml
+        mitamabonus datastore/BinaryData/Shield/MitamaReunionBonusData.xml
+        mitamasetbonus datastore/BinaryData/Shield/MitamaReunionSetBonusData.xml
+        mitamaunion datastore/BinaryData/Shield/MitamaUnionBonusData.xml
+        mod datastore/BinaryData/Shield/ModificationData.xml
+        modexteffect datastore/BinaryData/Shield/ModificationExtEffectData.xml
+        modextrecipe datastore/BinaryData/Shield/ModificationExtRecipeData.xml
+        modtrigger datastore/BinaryData/Shield/ModificationTriggerData.xml
+        modeffect datastore/BinaryData/Shield/ModifiedEffectData.xml
+        npcbarter datastore/BinaryData/Shield/NPCBarterData.xml
+        onpc datastore/BinaryData/Shield/oNPCData.xml
+        questbonuscode datastore/BinaryData/Shield/QuestBonusCodeData.xml
+        quest datastore/BinaryData/Shield/QuestData.xml
+        shopproduct datastore/BinaryData/Shield/ShopProductData.xml
+        sitem datastore/BinaryData/Shield/SItemData.xml
+        skill datastore/BinaryData/Shield/SkillData.xml
+        status datastore/BinaryData/Shield/StatusData.xml
+        synthesis datastore/BinaryData/Shield/SynthesisData.xml
+        timelimit datastore/BinaryData/Shield/TankData.xml
+        timelimit datastore/BinaryData/Shield/TimeLimitData.xml
+        triunionspecial datastore/BinaryData/Shield/TriUnionSpecialData.xml
+        urafieldtower datastore/BinaryData/Shield/UraFieldTowerData.xml
+        warppoint datastore/BinaryData/Shield/WarpPointData.xml
+        zone datastore/BinaryData/Shield/ZoneData.xml
+    )
+
+    ADD_CUSTOM_TARGET(testing ALL DEPENDS bin sbin)
+ENDIF(NOT UPDATER_ONLY AND NOT CHANNEL_ONLY)

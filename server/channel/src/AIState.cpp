@@ -8,7 +8,7 @@
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -26,39 +26,62 @@
 
 #include "AIState.h"
 
+// object Includes
+#include <MiAIData.h>
+#include <MiFindInfo.h>
+
+// channel Includes
+#include "ChannelServer.h"
+
 using namespace channel;
+
 namespace libcomp
 {
     template<>
     ScriptEngine& ScriptEngine::Using<AIState>()
     {
-        if(!BindingExists("AIState"))
+        if(!BindingExists("AIState", true))
         {
-            Sqrat::Class<AIState> binding(mVM, "AIState");
+            Using<objects::AIStateObject>();
+
+            Sqrat::DerivedClass<AIState,
+                objects::AIStateObject,
+                Sqrat::NoConstructor<AIState>> binding(mVM, "AIState");
             binding
-                .Func<AIStatus_t (AIState::*)() const>(
-                    "GetStatus", &AIState::GetStatus)
-                .Func<void (AIState::*)(const libcomp::String&,
-                    const libcomp::String&)>("OverrideAction",
-                    &AIState::OverrideAction);
+                .Func("GetStatus", &AIState::GetStatus)
+                .Func("SetStatus", &AIState::SetStatus);
 
             Bind<AIState>("AIState", binding);
+
+            Sqrat::Enumeration e(mVM);
+            e.Const("IDLE", (int32_t)AIStatus_t::IDLE);
+            e.Const("WANDERING", (int32_t)AIStatus_t::WANDERING);
+            e.Const("AGGRO", (int32_t)AIStatus_t::AGGRO);
+            e.Const("COMBAT", (int32_t)AIStatus_t::COMBAT);
+
+            Sqrat::ConstTable(mVM).Enum("AIStatus_t", e);
+
+            e = Sqrat::Enumeration(mVM);
+            e.Const("CLSR", AI_SKILL_TYPE_CLSR);
+            e.Const("LNGR", AI_SKILL_TYPE_LNGR);
+            e.Const("DEF", AI_SKILL_TYPE_DEF);
+            e.Const("HEAL", AI_SKILL_TYPE_HEAL);
+            e.Const("SUPPORT", AI_SKILL_TYPE_SUPPORT);
+            e.Const("ENEMY", AI_SKILL_TYPES_ENEMY);
+            e.Const("ALLY", AI_SKILL_TYPES_ALLY);
+            e.Const("ALL", AI_SKILL_TYPES_ALL);
+
+            Sqrat::ConstTable(mVM).Enum("AISkillType_t", e);
         }
 
         return *this;
     }
 }
 
-AIState::AIState() : mTargetEntityID(0), mSkillSettings(AI_SKILL_TYPES_ALL),
-    mStatus(AIStatus_t::IDLE), mPreviousStatus(AIStatus_t::IDLE),
-    mDefaultStatus(AIStatus_t::IDLE), mStatusChanged(false), mSkillsMapped(false)
+AIState::AIState() :  mStatus(AIStatus_t::IDLE),
+    mPreviousStatus(AIStatus_t::IDLE), mDefaultStatus(AIStatus_t::IDLE),
+    mStatusChanged(false)
 {
-    mLock = new std::mutex();
-}
-
-AIState::~AIState()
-{
-    delete mLock;
 }
 
 AIStatus_t AIState::GetStatus() const
@@ -76,17 +99,56 @@ AIStatus_t AIState::GetDefaultStatus() const
     return mDefaultStatus;
 }
 
-void AIState::SetStatus(AIStatus_t status, bool isDefault)
+bool AIState::SetStatus(AIStatus_t status, bool isDefault)
 {
-    mStatusChanged = mStatus != status;
-
-    mPreviousStatus = mStatus;
-    mStatus = status;
-
-    if(isDefault)
+    // Disallow default setting to target dependent status
+    if(isDefault &&
+        (status == AIStatus_t::AGGRO || status == AIStatus_t::COMBAT))
     {
-        mDefaultStatus = status;
+        return false;
     }
+
+    bool statusChanged = false;
+    {
+        std::lock_guard<std::mutex> lock(mFieldLock);
+        mStatusChanged = statusChanged = mStatus != status;
+
+        mPreviousStatus = mStatus;
+        mStatus = status;
+
+        if(isDefault)
+        {
+            mDefaultStatus = status;
+        }
+    }
+
+    if(statusChanged)
+    {
+        // Always reset next target time
+        SetNextTargetTime(0);
+
+        if(status == AIStatus_t::WANDERING)
+        {
+            uint64_t now = ChannelServer::GetServerTime();
+            if(GetDespawnWhenLost())
+            {
+                // Most entities despawn when switching to wandering after 5
+                // minutes if they don't make their way back to their spawn
+                // location
+                SetDespawnTimeout(now + 300000000ULL);
+            }
+
+            // Set next target time based on think speed
+            SetNextTargetTime(now + (uint64_t)(GetThinkSpeed() * 1000));
+        }
+        else if(GetDespawnTimeout())
+        {
+            // Clear if switching to anything else
+            SetDespawnTimeout(0);
+        }
+    }
+
+    return true;
 }
 
 bool AIState::IsIdle() const
@@ -101,6 +163,7 @@ bool AIState::StatusChanged() const
 
 void AIState::ResetStatusChanged()
 {
+    std::lock_guard<std::mutex> lock(mFieldLock);
     mStatusChanged = false;
 }
 
@@ -109,9 +172,49 @@ std::shared_ptr<libcomp::ScriptEngine> AIState::GetScript() const
     return mAIScript;
 }
 
-void AIState::SetScript(const std::shared_ptr<libcomp::ScriptEngine>& aiScript)
+void AIState::SetScript(
+    const std::shared_ptr<libcomp::ScriptEngine>& aiScript)
 {
     mAIScript = aiScript;
+}
+
+float AIState::GetAggroValue(uint8_t mode, bool fov, float defaultVal)
+{
+    auto aiData = GetBaseAI();
+    if(aiData && mode < 3)
+    {
+        auto fInfo = mode == 0 ? aiData->GetAggroNormal()
+            : (mode == 1 ? aiData->GetAggroNight() : aiData->GetAggroCast());
+
+        float val = fov
+            ? ((float)fInfo->GetFOV() / 360.f * 3.14f)
+            : (float)fInfo->GetDistance() * 10.f;
+        return val * GetAwareness();
+    }
+
+    return defaultVal;
+}
+
+float AIState::GetDeaggroDistance(bool isNight)
+{
+    float dist = GetAggroValue(isNight ? 1 : 0, false, 0.f);
+
+    // Enforce lower limit
+    const static float LOWER_LIMIT = AI_DEFAULT_AGGRO_RANGE;
+    if(!GetIgnoreDeaggroMin() && dist < LOWER_LIMIT)
+    {
+        dist = LOWER_LIMIT;
+    }
+
+    dist = (dist < 200.f ? 200.f : dist) * (float)GetDeaggroScale();
+
+    // Enforce upper limit
+    if(!GetIgnoreDeaggroMax() && dist > MAX_ENTITY_DRAW_DISTANCE)
+    {
+        return MAX_ENTITY_DRAW_DISTANCE;
+    }
+
+    return dist;
 }
 
 std::shared_ptr<AICommand> AIState::GetCurrentCommand() const
@@ -119,28 +222,53 @@ std::shared_ptr<AICommand> AIState::GetCurrentCommand() const
     return mCurrentCommand;
 }
 
-void AIState::QueueCommand(const std::shared_ptr<AICommand>& command)
+void AIState::QueueCommand(const std::shared_ptr<AICommand>& command,
+    bool interrupt)
 {
-    mCommandQueue.push_back(command);
-
-    if(mCommandQueue.size() == 1)
+    std::lock_guard<std::mutex> lock(mFieldLock);
+    if(interrupt)
     {
+        mCommandQueue.push_front(command);
         mCurrentCommand = command;
     }
+    else
+    {
+        mCommandQueue.push_back(command);
+
+        if(mCommandQueue.size() == 1)
+        {
+            mCurrentCommand = command;
+        }
+    }
+
 }
 
 void AIState::ClearCommands()
 {
+    std::lock_guard<std::mutex> lock(mFieldLock);
     mCommandQueue.clear();
     mCurrentCommand = nullptr;
 }
 
-std::shared_ptr<AICommand> AIState::PopCommand()
+std::shared_ptr<AICommand> AIState::PopCommand(
+    const std::shared_ptr<AICommand>& specific)
 {
-    if(mCommandQueue.size() > 0)
+    std::lock_guard<std::mutex> lock(mFieldLock);
+    if(specific)
     {
-        auto command = mCommandQueue.front();
-        mCommandQueue.pop_front();
+        mCommandQueue.remove_if([specific]
+            (const std::shared_ptr<AICommand>& cmd)
+            {
+                return cmd == specific;
+            });
+    }
+    else
+    {
+        if(mCommandQueue.size() > 0)
+        {
+            auto command = mCommandQueue.front();
+            mCommandQueue.pop_front();
+        }
     }
 
     mCurrentCommand = nullptr;
@@ -152,68 +280,21 @@ std::shared_ptr<AICommand> AIState::PopCommand()
     return mCurrentCommand;
 }
 
-int32_t AIState::GetTarget() const
-{
-    return mTargetEntityID;
-}
-
-void AIState::SetTarget(int32_t targetEntityID)
-{
-    mTargetEntityID = targetEntityID;
-}
-
-uint16_t AIState::GetSkillSettings() const
-{
-    return mSkillSettings;
-}
-
-void AIState::SetSkillSettings(uint16_t skillSettings)
-{
-    if(mSkillSettings != skillSettings)
-    {
-        mSkillSettings = skillSettings;
-        ResetSkillsMapped();
-    }
-}
-
-bool AIState::SkillsMapped() const
-{
-    return mSkillsMapped;
-}
-
 void AIState::ResetSkillsMapped()
 {
-    std::lock_guard<std::mutex> lock(*mLock);
-    mSkillsMapped = false;
+    SetSkillsMapped(false);
+
+    std::lock_guard<std::mutex> lock(mFieldLock);
     mSkillMap.clear();
 }
 
-std::unordered_map<uint16_t,
-    std::vector<uint32_t>> AIState::GetSkillMap() const
+AISkillMap_t AIState::GetSkillMap() const
 {
     return mSkillMap;
 }
 
-void AIState::SetSkillMap(const std::unordered_map<uint16_t,
-    std::vector<uint32_t>> &skillMap)
+void AIState::SetSkillMap(const AISkillMap_t& skillMap)
 {
-    std::lock_guard<std::mutex> lock(*mLock);
+    std::lock_guard<std::mutex> lock(mFieldLock);
     mSkillMap = skillMap;
-}
-
-void AIState::OverrideAction(const libcomp::String& action,
-    const libcomp::String& functionName)
-{
-    mActionOverrides[action.C()] = functionName;
-}
-
-bool AIState::IsOverriden(const libcomp::String& action)
-{
-    return mActionOverrides.find(action.C()) != mActionOverrides.end();
-}
-
-libcomp::String AIState::GetScriptFunction(const libcomp::String& action)
-{
-    auto it = mActionOverrides.find(action.C());
-    return it != mActionOverrides.end() ? it->second : "";
 }

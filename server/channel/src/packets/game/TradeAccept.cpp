@@ -8,7 +8,7 @@
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -32,13 +32,13 @@
 #include <PacketCodes.h>
 
 // object Includes
-#include <Account.h>
-#include <Character.h>
-#include <TradeSession.h>
+#include <PlayerExchangeSession.h>
 
 // channel Includes
 #include "ChannelServer.h"
+#include "CharacterManager.h"
 #include "ClientState.h"
+#include "ManagerConnection.h"
 
 using namespace channel;
 
@@ -57,13 +57,12 @@ bool Parsers::TradeAccept::Parse(libcomp::ManagerPacket *pPacketManager,
     auto client = std::dynamic_pointer_cast<ChannelClientConnection>(connection);
     auto state = client->GetClientState();
     auto cState = state->GetCharacterState();
+    auto exchangeSession = state->GetExchangeSession();
 
-    auto otherCState = std::dynamic_pointer_cast<CharacterState>(
-        state->GetTradeSession()->GetOtherCharacterState());
-    auto otherChar = otherCState != nullptr ? otherCState->GetEntity() : nullptr;
-    auto otherClient = otherChar != nullptr ?
-        server->GetManagerConnection()->GetClientConnection(
-            otherChar->GetAccount()->GetUsername()) : nullptr;
+    auto otherCState = exchangeSession ? std::dynamic_pointer_cast<CharacterState>(
+        exchangeSession->GetOtherCharacterState()) : nullptr;
+    auto otherClient = otherCState ? server->GetManagerConnection()->GetEntityClient(
+        otherCState->GetEntityID(), false) : nullptr;
 
     bool cancel = false;
     if(!otherClient)
@@ -72,8 +71,8 @@ bool Parsers::TradeAccept::Parse(libcomp::ManagerPacket *pPacketManager,
     }
     else
     {
-        auto otherSession = otherClient->GetClientState()->GetTradeSession();
-        if(otherSession->GetOtherCharacterState() != cState)
+        auto otherSession = otherClient->GetClientState()->GetExchangeSession();
+        if(!otherSession || otherSession->GetOtherCharacterState() != cState)
         {
             cancel = true;
         }
@@ -84,7 +83,7 @@ bool Parsers::TradeAccept::Parse(libcomp::ManagerPacket *pPacketManager,
 
     if(cancel)
     {
-        state->SetTradeSession(std::make_shared<objects::TradeSession>());
+        state->SetExchangeSession(nullptr);
 
         // Rejected
         reply.WriteS32Little(-1);
@@ -95,10 +94,14 @@ bool Parsers::TradeAccept::Parse(libcomp::ManagerPacket *pPacketManager,
     // Accepted
     reply.WriteS32Little(0);
 
-    characterManager->SetStatusIcon(otherClient, 8);
-
     client->QueuePacketCopy(reply);
-    otherClient->SendPacket(reply);
+
+    if(otherClient)
+    {
+        characterManager->SetStatusIcon(otherClient, 8);
+        otherClient->SendPacket(reply);
+    }
+
     characterManager->SetStatusIcon(client, 8);
 
     return true;

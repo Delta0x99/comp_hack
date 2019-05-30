@@ -8,7 +8,7 @@
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -38,22 +38,38 @@
 #include <RegisteredWorld.h>
 
 // channel Includes
-#include "AccountManager.h"
-#include "ActionManager.h"
-#include "AIManager.h"
-#include "CharacterManager.h"
-#include "ChatManager.h"
-#include "DefinitionManager.h"
-#include "EventManager.h"
-#include "ServerDataManager.h"
-#include "SkillManager.h"
-#include "ZoneManager.h"
+#include "WorldClock.h"
+
+namespace libcomp
+{
+class DefinitionManager;
+class ServerDataManager;
+}
+
+namespace objects
+{
+class Character;
+class WorldSharedConfig;
+}
 
 namespace channel
 {
 
 typedef uint64_t ServerTime;
 typedef ServerTime (*GET_SERVER_TIME)();
+
+class AccountManager;
+class ActionManager;
+class AIManager;
+class ChannelSyncManager;
+class CharacterManager;
+class ChatManager;
+class EventManager;
+class FusionManager;
+class MatchManager;
+class SkillManager;
+class TokuseiManager;
+class ZoneManager;
 
 /**
  * Channel server that handles client packets in game.
@@ -93,6 +109,12 @@ public:
     virtual void Shutdown();
 
     /**
+     * This is called before Run() ends giving a derived class the chance to
+     * do additional cleanup.
+     */
+    virtual void Cleanup();
+
+    /**
      * Get the current time relative to the server.
      * @return Current time relative to the server
      */
@@ -107,18 +129,29 @@ public:
         uint32_t relativeTo = 0);
 
     /**
-     * Get the world clock time of the server.
-     * @param phase Output param, world clock phase of the server
-     * @param hour Output param, world clock hours of the server
-     * @param min Output param, world clock minutes of the server
+     * Get the world clock time of the server. This is thread safe and checks
+     * to make sure it does not calculate more than is needed.
+     * @return Current world clock time
      */
-    void GetWorldClockTime(int8_t& phase, int8_t& hour, int8_t& min);
+    const WorldClock GetWorldClockTime();
+
+    /**
+     * Set a custom time offset for the world clock (in seconds)
+     * @param offset Custom time offset (in seconds)
+     */
+    void SetTimeOffset(uint32_t offset);
 
     /**
      * Get the RegisteredChannel.
      * @return Pointer to the RegisteredChannel
      */
     const std::shared_ptr<objects::RegisteredChannel> GetRegisteredChannel();
+
+    /**
+     * Get the current channel ID from the RegisteredChannel
+     * @return Current channel ID
+     */
+    uint8_t GetChannelID();
 
     /**
      * Get all channels registerd on the channel's world (including
@@ -222,6 +255,18 @@ public:
     EventManager* GetEventManager() const;
 
     /**
+     * Get a pointer to the fusion manager.
+     * @return Pointer to the FusionManager
+     */
+    FusionManager* GetFusionManager() const;
+
+    /**
+     * Get a pointer to the match manager.
+     * @return Pointer to the MatchManager
+     */
+    MatchManager* GetMatchManager() const;
+
+    /**
      * Get a pointer to the skill manager.
      * @return Pointer to the SkillManager
      */
@@ -244,6 +289,24 @@ public:
      * @return Pointer to the ServerDataManager
      */
     libcomp::ServerDataManager* GetServerDataManager() const;
+
+    /**
+     * Get a pointer to the data sync manager.
+     * @return Pointer to the ChannelSyncManager
+     */
+    ChannelSyncManager* GetChannelSyncManager() const;
+
+    /**
+     * Get a pointer to the tokusei manager.
+     * @return Pointer to the TokuseiManager
+     */
+    TokuseiManager* GetTokuseiManager() const;
+
+    /**
+     * Get the world server supplied shared config settings.
+     * @return Pointer to the world shared config
+     */
+    std::shared_ptr<objects::WorldSharedConfig> GetWorldSharedConfig() const;
 
     /**
      * Increments and returns the next available entity ID.
@@ -271,16 +334,77 @@ public:
 
     /**
     * Sends an announcement to each client connected to world
-    * Color can be chosen out of four colors:
-    * @param client, client that sent announcement packet to channel
-    * @param message, content of message that will be announced
-    * @param color, color of the ticker message, red, white, blue, purple
-    * @param bool, if true, the packet will be broadcasted to everyone in the current zone
-    * @return True if the message was successfully sent, false otherwise.
+    * @param client Client that sent announcement packet to channel
+    * @param message Content of message that will be announced
+    * @param type Type of message to send
+    *  0) Red ticker message
+    *  1) White ticker message
+    *  2) Blue ticker message
+    *  3) Purple ticker message
+    *  4) COMP shop description
+    * @param broadcast If true, the packet will be broadcasted to everyone in
+    *  the current zone
+    * @return true if the message was successfully sent, false otherwise.
     */
     bool SendSystemMessage(const std::shared_ptr<
         channel::ChannelClientConnection>& client,
-        libcomp::String message, int8_t color, bool);
+        libcomp::String message, int8_t type, bool broadcast);
+
+    /**
+     * Get the configured server time offset in seconds.
+     * @return Server time offset in seconds
+     */
+    int32_t GetServerTimeOffset();
+
+    /**
+     * Get the system time deadline for all punitive attributes
+     * which matches midnight of the next Monday. Punitive atributes
+     * are used for time restricted actions such as participation in
+     * the "invoke" events.
+     * @return System time respresenting the punitive attribute deadline
+     */
+    int32_t GetPAttributeDeadline();
+
+    /**
+     * Get the default character creation object map.
+     * @return Default character creation object map
+     */
+    PersistentObjectMap GetDefaultCharacterObjectMap() const;
+
+    /**
+     * Schedule recurring actions that continue to run until the server shuts
+     * down. This does not need to run until the channel has successfully
+     * registered with the world.
+     */
+    void ScheduleRecurringActions();
+
+    /**
+     * Register a timed event to occur when the world clock is updated to
+     * pass that time
+     * @param time Time to register
+     * @param type Type identifier to register the time with. This allows
+     *  multiple sources to register the same time and have the server
+     *  clean up as needed upon removal.
+     * @param remove true if the time should be removed, false if it should
+     *  should be registered
+     * @return true if the time was registered properly, false if a failure
+     *  ocurred
+     */
+    bool RegisterClockEvent(WorldClockTime time, uint8_t type, bool remove);
+
+    /**
+     * Clock event handler that is called once every second to update the
+     * the world time. If the registered "next time" is hit, the time sources
+     * will be notified to recalculate updates.
+     */
+    void HandleClockEvents();
+
+    /**
+     * Update and notify all currently connected players of demon quests
+     * becoming available for the next day. By default this is scheduled to
+     * execute at midnight UTC.
+     */
+    void HandleDemonQuestReset();
 
     /**
      * Schedule code work to be queued by the next server tick that occurs
@@ -304,6 +428,13 @@ public:
     }
 
 protected:
+    /**
+     * Get the number of seconds until midnight of the next day. Useful
+     * for scheduling timed events.
+     * @return Number of seconds until midnight of the next day
+     */
+    uint32_t GetTimeUntilMidnight();
+
     /**
      * Create a connection to a newly active socket.
      * @param socket A new socket connection.
@@ -330,10 +461,24 @@ protected:
     /// available for the current machine.
     static GET_SERVER_TIME sGetServerTime;
 
+    /**
+     * Recalculate the next time the world clock will fire an event on.
+     * This will be stored as a system timestamp for easy comparison.
+     */
+    void RecalcNextWorldEventTime();
+
     /// Timestamp ordered map of prepared Execute messages and timestamps
     /// associated to when they should be queued following a server tick
     std::map<ServerTime,
         std::list<libcomp::Message::Execute*>> mScheduledWork;
+
+    /// Map of world clock times to the type of event that will
+    /// occur at that time. Types include:
+    /// 1) Spawn activation/deactivation
+    /// 2) Tokusei active timespans
+    /// 3) Zone event trigger
+    /// 4) Global zone event trigger
+    std::map<WorldClockTime, std::set<uint8_t>> mWorldClockEvents;
 
     /// Pointer to the manager in charge of connection messages.
     std::shared_ptr<ManagerConnection> mManagerConnection;
@@ -353,6 +498,9 @@ protected:
     /// List of pointers to all RegisteredChannels for the world.
     std::list<std::shared_ptr<objects::RegisteredChannel>> mAllRegisteredChannels;
 
+    /// Map of default character creation state objects
+    PersistentObjectMap mDefaultCharacterObjectMap;
+
     /// Pointer to the account manager.
     AccountManager *mAccountManager;
 
@@ -371,6 +519,12 @@ protected:
     /// Pointer to the Event Manager.
     EventManager *mEventManager;
 
+    /// Pointer to the Fusion Manager.
+    FusionManager *mFusionManager;
+
+    /// Pointer to the Match Manager.
+    MatchManager *mMatchManager;
+
     /// Pointer to the Skill Manager.
     SkillManager *mSkillManager;
 
@@ -383,17 +537,47 @@ protected:
     /// Pointer to the Server Data Manager.
     libcomp::ServerDataManager *mServerDataManager;
 
+    /// Data sync manager for the server.
+    ChannelSyncManager* mSyncManager;
+
+    /// Tokusei manager for the server.
+    TokuseiManager* mTokuseiManager;
+
+    /// Server world clock
+    WorldClock mWorldClock;
+
+    /// World clock time of the last time zone events processed
+    WorldClockTime mLastEventTrigger;
+
+    /// System time representation of the next world clock
+    /// event time that the clock needs to react to
+    uint32_t mNextEventTime;
+
+    /// true if the sources of each time registered should
+    /// should be updated based on the last clock update
+    bool mRecalcTimeDependents;
+
     /// Highest entity ID currently assigned
     int32_t mMaxEntityID;
 
     /// Highest unique object ID currently assigned
     int64_t mMaxObjectID;
 
+    /// Inidicates how many tick messages are sitting in the queue.
+    /// Incremented by StartTick and decremented by Tick.
+    uint8_t mTicksPending;
+
     /// Thread that queues up tick messages after a delay.
     std::thread mTickThread;
 
     /// Server lock for shared resources
     std::mutex mLock;
+
+    /// Server lock for server time calculation
+    std::mutex mTimeLock;
+
+    /// Server lock for setting the tick pending indicator
+    std::mutex mTickLock;
 
     /// If the tick thread should continue running.
     volatile bool mTickRunning;

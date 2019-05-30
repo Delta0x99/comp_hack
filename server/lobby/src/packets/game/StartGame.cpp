@@ -8,7 +8,7 @@
  *
  * This file is part of the Lobby Server (lobby).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -52,41 +52,64 @@ bool Parsers::StartGame::Parse(libcomp::ManagerPacket *pPacketManager,
     const std::shared_ptr<libcomp::TcpConnection>& connection,
     libcomp::ReadOnlyPacket& p) const
 {
-    (void)pPacketManager;
-
-    if(p.Size() != 2)
+    // Sanity check the packet size.
+    if(2 != p.Size())
     {
         return false;
     }
 
+    // Grab the character ID.
     uint8_t cid = p.ReadU8();
-    int8_t worldID = p.ReadS8();
 
-    auto client = std::dynamic_pointer_cast<LobbyClientConnection>(connection);
+    int8_t unknown = p.ReadS8();    // Always zero, selected channel?
+    (void)unknown;
+
+    // We need all this jazz.
+    auto client = std::dynamic_pointer_cast<LobbyClientConnection>(
+        connection);
     auto state = client->GetClientState();
-    auto username = state->GetAccount()->GetUsername();
-
     auto account = state->GetAccount();
+    auto username = account->GetUsername();
+    auto server = std::dynamic_pointer_cast<LobbyServer>(
+        pPacketManager->GetServer());
 
-    auto server = std::dynamic_pointer_cast<LobbyServer>(pPacketManager->GetServer());
-    auto world = server->GetWorldByID((uint8_t)worldID);
+    // We need all this jazz too.
     auto accountManager = server->GetAccountManager();
+    auto character = account->GetCharacters(cid).Get();
 
-    int8_t loginWorldID;
-    if(!accountManager->IsLoggedIn(username, loginWorldID) || loginWorldID != -1)
+    // What? Go away hacker.
+    if(!character)
     {
-        LOG_ERROR(libcomp::String("User '%1' attempted to start a game but is not"
-            " currently logged into the lobby.\n").Arg(username));
+        LOG_ERROR("Failed to get character?!\n");
+
         return false;
     }
 
-    // Expire session with current time, meaning until we hear back from the
-    // channel that the login took place, do not consider the connection valid
-    server->GetSessionManager()->ExpireSession(username, 0);
+    auto world = server->GetWorldByID(character->GetWorldID());
 
-    auto login = accountManager->GetUserLogin(username);
-    login->GetCharacterLogin()->SetCharacter(account->GetCharacters(cid));
+    // Check the world is still there.
+    if(!world)
+    {
+        LOG_ERROR(libcomp::String("User '%1' tried to loging to world %2 but "
+            "that world is not active.\n").Arg(username)
+            .Arg(character->GetWorldID()));
 
+        return false;
+    }
+
+    // Start the channel login process.
+    auto login = accountManager->StartChannelLogin(username, character);
+
+    if(!login)
+    {
+        return false;
+    }
+
+    LOG_DEBUG(libcomp::String("Start game request received for character"
+        " '%1' from %2\n").Arg(character->GetName())
+        .Arg(client->GetRemoteAddress()));
+
+    // Let the world know what we want to do.
     libcomp::Packet request;
     request.WritePacketCode(InternalPacketCode_t::PACKET_ACCOUNT_LOGIN);
     login->SavePacket(request, false);

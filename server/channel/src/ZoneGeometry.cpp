@@ -9,7 +9,7 @@
  *
  * This file is part of the Channel Server (channel).
  *
- * Copyright (C) 2012-2016 COMP_hack Team <compomega@tutanota.com>
+ * Copyright (C) 2012-2018 COMP_hack Team <compomega@tutanota.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -30,6 +30,9 @@
 // Standard C++11 includes
 #include <cmath>
 #include <map>
+
+// object includes
+#include <QmpElement.h>
 
 using namespace channel;
 
@@ -85,10 +88,18 @@ bool Line::Intersect(const Line& other, Point& point, float& dist) const
     Point delta1(dest.x - src.x, dest.y - src.y);
     Point delta2(second.x - first.x, second.y - first.y);
 
+    float det = -delta2.x * delta1.y + delta1.x * delta2.y;
+    if(det == 0.f)
+    {
+        // If the determinate is zero, the lines are parallel and the point
+        // of intersection is undefined
+        return false;
+    }
+
     float s = (-delta1.y * (src.x - first.x) + delta1.x *
-        (src.y - first.y)) / (-delta2.x * delta1.y + delta1.x * delta2.y);
+        (src.y - first.y)) / det;
     float t = (delta2.x * (src.y - first.y) - delta2.y *
-        (src.x - first.x)) / (-delta2.x * delta1.y + delta1.x * delta2.y);
+        (src.x - first.x)) / det;
 
     if(s < 0 || s > 1 || t < 0 || t > 1)
         return false;
@@ -104,7 +115,7 @@ bool Line::Intersect(const Line& other, Point& point, float& dist) const
     return true;
 }
 
-ZoneShape::ZoneShape() : IsLine(true)
+ZoneShape::ZoneShape() : IsLine(true), OneWay(false)
 {
 }
 
@@ -112,10 +123,10 @@ bool ZoneShape::Collides(const Line& path, Point& point, Line& surface) const
 {
     // If the path is outside of the boundary rectangle and doesn't cross
     // through the max/min boundary points, no collision can exist
-    if((path.first.x < Boundaries[0].x && path.second.x < Boundaries[0].x) ||
-        (path.first.x > Boundaries[1].x && path.second.x > Boundaries[1].x) ||
-        (path.first.y < Boundaries[0].y && path.second.y < Boundaries[0].y) ||
-        (path.first.y > Boundaries[1].y && path.second.y > Boundaries[1].y))
+    if(((path.first.x < Boundaries[0].x && path.second.x < Boundaries[0].x) ||
+        (path.first.x > Boundaries[1].x && path.second.x > Boundaries[1].x)) &&
+        ((path.first.y < Boundaries[0].y && path.second.y < Boundaries[0].y) ||
+        (path.first.y > Boundaries[1].y && path.second.y > Boundaries[1].y)))
     {
         return false;
     }
@@ -124,9 +135,23 @@ bool ZoneShape::Collides(const Line& path, Point& point, Line& surface) const
     std::map<float, std::pair<const Line*, Point>> collisions;
     for(const Line& s : Lines)
     {
-        if(s.Intersect(path, point, dist))
+        bool intersect = s.Intersect(path, point, dist);
+        bool passThrough = false;
+
+        if(intersect && OneWay)
         {
-            collisions[dist] = std::pair<const Line*, Point>(&surface, point);
+            // If the first point of the line being drawn is to the right of the
+            // direction of the path, allow pass through
+            if(((path.second.x - path.first.x) * (s.first.y - path.first.y) -
+                (path.second.y - path.first.y) * (s.first.x - path.first.x)) < 0)
+            {
+                passThrough = true;
+            }
+        }
+
+        if(intersect && !passThrough)
+        {
+            collisions[dist] = std::pair<const Line*, Point>(&s, point);
         }
     }
 
@@ -145,8 +170,19 @@ bool ZoneShape::Collides(const Line& path, Point& point, Line& surface) const
     }
 }
 
-ZoneQmpShape::ZoneQmpShape() : ShapeID(0), InstanceID(0)
+ZoneQmpShape::ZoneQmpShape() : ShapeID(0), InstanceID(0), Active(true)
 {
+}
+
+bool ZoneQmpShape::Collides(const Line& path, Point& point,
+    Line& surface) const
+{
+    if(Active)
+    {
+        return ZoneShape::Collides(path, point, surface);
+    }
+
+    return false;
 }
 
 ZoneSpotShape::ZoneSpotShape()
@@ -154,13 +190,16 @@ ZoneSpotShape::ZoneSpotShape()
 }
 
 bool ZoneGeometry::Collides(const Line& path, Point& point, Line& surface,
-    std::shared_ptr<ZoneShape>& shape) const
+    std::shared_ptr<ZoneShape>& shape, const std::set<
+    uint32_t> disabledBarriers) const
 {
     std::map<float, std::pair<std::shared_ptr<ZoneShape>, std::pair<
         const Line*, Point>>> collisions;
     for(auto s : Shapes)
     {
-        if(s->Collides(path, point, surface))
+        bool disabled = s->Element ? disabledBarriers.find(s->Element->GetID())
+            != disabledBarriers.end() : false;
+        if(!disabled && s->Collides(path, point, surface))
         {
             float dSquared = (float)(std::pow((path.first.x - point.x), 2)
                 + std::pow((path.first.y - point.y), 2));
@@ -170,7 +209,7 @@ bool ZoneGeometry::Collides(const Line& path, Point& point, Line& surface,
         }
     }
     
-    // If a collision exists, retun true with the closest point, surface
+    // If a collision exists, return true with the closest point, surface
     // and shape in the output params
     if(collisions.size() > 0)
     {
